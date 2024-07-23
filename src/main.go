@@ -1,25 +1,118 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
-	"github.com/gorilla/websocket"
 	"log"
 	"os"
+
+	"github.com/gorilla/websocket"
+)
+
+const (
+	MessageTypeRegister = 0x01
+	// For the actual transfer
+	MessageTypeTransfer = 0x02
+	version             = byte(1)
 )
 
 // Packet breakdown
-// [version 1byte][unique_code 1byte][data_size 2byte][sender/receiver][sender/receiver name][remaining for the data]
+// [message_type 1byte][version 1byte][unique_code 1byte][data_size 2byte][sender/receiver][sender/receiver name][remaining for the data]
 
-type Packet struct {
-	Version          byte
-	UniqueCode       byte
-	DataSize         uint16
-	SenderOrReceiver byte
-	ClientName       string
-	Data             []byte
+// Since handshake is a 1 time thing, it will be done through json
+type ClientHandshake struct {
+	Version uint8
+	// Sender => 0, Receiver => 1
+	Intent     uint8
+	UniqueCode uint8
+	FileSize   uint16
+	ClientName string
+	Filename   string
 }
 
-// Endianness refers to byte order in a multi-byte object
+type Packet struct {
+	Version    byte
+	UniqueCode byte
+	DataSize   uint16
+	Data       []byte
+}
+
+// Every client needs to register with the server by handshaking with ClientHandshake obj
+// It is difficult to differentiate between register requests and packet transfer requests
+// Thus a special 1 byte is appended to the start of each request to indicate the type.
+func CreateRegisterRequestPacket(handshakeObj *ClientHandshake) ([]byte, error) {
+	messageType := []byte{MessageTypeRegister}
+	requestJson, err := json.Marshal(handshakeObj)
+	if err != nil {
+		return nil, err
+	}
+
+	message := append(messageType, requestJson...)
+	return message, nil
+}
+
+// []byte type in go is already a reference type
+func SerializePacket(outgoingPacket *Packet) ([]byte, error) {
+	buffer := new(bytes.Buffer)
+
+	// Append an indicator byte to tell the server that this is for transfer
+	// 2 variants for register and transfer
+	if err := binary.Write(buffer, binary.BigEndian, MessageTypeTransfer); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buffer, binary.BigEndian, outgoingPacket.Version); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buffer, binary.BigEndian, outgoingPacket.UniqueCode); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buffer, binary.BigEndian, outgoingPacket.DataSize); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buffer, binary.BigEndian, outgoingPacket.Data); err != nil {
+		return nil, err
+	}
+
+	return buffer.Bytes(), nil
+}
+
+// Parse the incoming []byte into a Packet object.
+// Converting to struct might be an overhead.
+// Maybe should try a more direct method.
+// TBD
+func ParsePacket(packetBytes []byte) (*Packet, error) {
+	var receivedPacket Packet
+	buffer := bytes.NewReader(packetBytes)
+
+	// 1 byte, version
+	if err := binary.Read(buffer, binary.BigEndian, &receivedPacket.Version); err != nil {
+		return &receivedPacket, err
+	}
+
+	// 1 byte/uint8, unique_code
+	if err := binary.Read(buffer, binary.BigEndian, &receivedPacket.UniqueCode); err != nil {
+		return &receivedPacket, err
+	}
+
+	// 4 byte/uint8, data_size
+	if err := binary.Read(buffer, binary.BigEndian, &receivedPacket.DataSize); err != nil {
+		return &receivedPacket, err
+	}
+
+	// Initialize a size of the Data, read into it normally
+	receivedPacket.Data = make([]byte, receivedPacket.DataSize)
+	if err := binary.Read(buffer, binary.BigEndian, &receivedPacket.Data); err != nil {
+		return &receivedPacket, err
+	}
+
+	return &receivedPacket, nil
+}
 
 // TODO: Implement cli using flags
 func main() {
@@ -29,15 +122,18 @@ func main() {
 		return
 	}
 
-	wsUrl := "ws://localhost:4000/api/fileshare"
+	// wsUrl := "ws://localhost:4000/api/fileshare"
+	//
+	// conn, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
+	// if err != nil {
+	// 	log.Println("E:Connecting ws server.", err.Error())
+	// 	return
+	// }
+	//
+	// defer conn.Close()
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
-	if err != nil {
-		log.Println("E:Connecting ws server.", err.Error())
-		return
-	}
-
-	defer conn.Close()
+	senderName := "mrSender"
+	// receiverName := "mrReceiver"
 
 	// Maybe get input
 	choice := cli_args[0]
@@ -59,12 +155,27 @@ func main() {
 			return
 		}
 
-		fmt.Printf("Sending %s [%.2fMB]", fileinfo.Name(), float64(fileinfo.Size())/float64(1000_000))
+		fmt.Printf("Sending %s [%.2fMB]\n", fileinfo.Name(), float64(fileinfo.Size())/float64(1000_000))
 
-		SendFile(filepath, conn)
+		pkt, err := CreateRegisterRequestPacket(&ClientHandshake{
+			Version:    version,
+			Intent:     0,
+			UniqueCode: 0,
+			ClientName: senderName,
+			FileSize:   uint16(fileinfo.Size()),
+			Filename:   fileinfo.Name(),
+		})
+		if err != nil {
+			log.Println("E:Creating handshake packet.", err.Error())
+			return
+		}
+
+		fmt.Printf("% X \n", pkt)
+
+		// SendFile(filepath, conn)
 
 	} else if choice == "receive" {
-		ReceiveFile(conn)
+		// ReceiveFile(conn)
 
 	} else {
 		fmt.Println("Invalid Argument \n'tshare-client.exe send <path> | receive'")
