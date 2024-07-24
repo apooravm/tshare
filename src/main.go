@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strconv"
@@ -32,6 +33,9 @@ const (
 
 	// Transfer packet from sender to receiver.
 	InitialTypeTransferPacket = uint8(0x06)
+
+	// Volutanry disconnection
+	InitialTypeCloseConn = uint(0x08)
 
 	// Text message about some issue or error or whatever
 	InitialTypeTextMessage = uint8(0x09)
@@ -268,6 +272,24 @@ func HandleSendArg(conn *websocket.Conn) {
 				fmt.Println("Server:", string(response[1:]))
 
 			}
+
+		// response[1] -> Begin transfer
+		// reponse[1] -> Abrort transfer
+		case InitialTypeBeginTransfer:
+			if len(response) != 2 {
+				log.Println("E:Server responded with nothing.")
+				_ = conn.Close()
+				return
+			}
+
+			var beginTransferOrNo uint8 = response[1]
+			if beginTransferOrNo == 1 {
+				fmt.Println("Starting file transfer")
+				SendFile(filepath, conn)
+
+			} else if beginTransferOrNo == 0 {
+				fmt.Println("Aborting file transfer")
+			}
 		}
 	}
 
@@ -306,6 +328,16 @@ func HandleReceiveArg(conn *websocket.Conn) {
 		log.Println("E:Sending receiver register packet.", err.Error())
 		return
 	}
+
+	filepath := "./local/received/sample_vid.mp4"
+
+	targetFile, err := os.Create(filepath)
+	if err != nil {
+		log.Println("E:Creating target file.", err.Error())
+		return
+	}
+
+	defer targetFile.Close()
 
 	// Read loop
 	for {
@@ -366,12 +398,6 @@ func HandleReceiveArg(conn *websocket.Conn) {
 				return
 			}
 
-			if err := binary.Write(&resBytes, binary.BigEndian, unique_code); err != nil {
-				fmt.Println("E:Creating binary response. Closing.", err.Error())
-				_ = conn.Close()
-				return
-			}
-
 			if err := conn.WriteMessage(websocket.BinaryMessage, resBytes.Bytes()); err != nil {
 				fmt.Println("E:Writing response. Closing.", err.Error())
 				_ = conn.Close()
@@ -385,7 +411,19 @@ func HandleReceiveArg(conn *websocket.Conn) {
 				log.Println("E:Parsing incoming packet. Stopping.", err.Error())
 				_ = conn.Close()
 			}
-			fmt.Println(pkt.DataSize)
+
+			// _, message, err := conn.ReadMessage()
+			// if err != nil {
+			// 	log.Println("E:Reading chunk.", err.Error())
+			// 	return
+			// }
+
+			// fmt.Println(pkt.DataSize)
+			_, err = targetFile.Write(pkt.Data)
+			if err != nil {
+				log.Println("E:Writing data.", err.Error())
+				return
+			}
 
 		// Text response from the server
 		case InitialTypeTextMessage:
@@ -403,29 +441,6 @@ func HandleReceiveArg(conn *websocket.Conn) {
 }
 
 func ReceiveFile(conn *websocket.Conn) {
-	filepath := "./local/received/sample_vid.mp4"
-
-	targetFile, err := os.Create(filepath)
-	if err != nil {
-		log.Println("E:Creating target file.", err.Error())
-		return
-	}
-
-	defer targetFile.Close()
-
-	for {
-		_, message, err := conn.ReadMessage()
-		if err != nil {
-			log.Println("E:Reading chunk.", err.Error())
-			return
-		}
-
-		_, err = targetFile.Write(message)
-		if err != nil {
-			log.Println("E:Writing data.", err.Error())
-			return
-		}
-	}
 }
 
 func SendFile(filepath string, conn *websocket.Conn) {
@@ -437,23 +452,41 @@ func SendFile(filepath string, conn *websocket.Conn) {
 
 	defer file.Close()
 
-	buf := make([]byte, 1024)
+	buf := make([]byte, 16384)
 	for {
 		// Reads len(buf) -> 1024 bytes and stores them into buf itself
 		n, err := file.Read(buf)
 		if err != nil {
-			log.Println("E:Reading file.", err.Error())
+			if err != io.EOF {
+				log.Println("E:Reading file.", err.Error())
+			} else {
+				fmt.Println("Finished upload")
+			}
 			return
 		}
 
 		// EOF
 		if n == 0 {
+			conn.Close()
 			break
+		}
+
+		pkt_frame, err := SerializePacket(&Packet{
+			Version:    version,
+			UniqueCode: unique_code,
+			DataSize:   uint16(n),
+			Data:       buf[:n],
+		})
+
+		if err != nil {
+			fmt.Println("E:Could not SerializePacket.", err.Error())
+			_ = conn.Close()
+			return
 		}
 
 		// buf[:n] to send only the valid portion of read data
 		// So if at the end only 9 bytes were read, we send only that 9 byte slice.
-		if err = conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+		if err = conn.WriteMessage(websocket.BinaryMessage, pkt_frame); err != nil {
 			log.Println("E:Sending chunk.", err.Error())
 			return
 		}
