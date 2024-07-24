@@ -7,15 +7,41 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 
 	"github.com/gorilla/websocket"
 )
 
 const (
-	MessageTypeRegister = 0x01
-	// For the actual transfer
-	MessageTypeTransfer = 0x02
-	version             = byte(1)
+	// Register a sender
+	InitialTypeRegisterSender = uint8(0x01)
+
+	// Server responds back to sender with a unique code
+	InitialTypeUniqueCode = uint8(0x02)
+
+	// Register a receiver
+	InitialTypeRegisterReceiver = uint8(0x03)
+
+	// Server sends metadata of the transfer to the receiver
+	InitialTypeTransferMetaData = uint8(0x04)
+
+	// Server responds back to sender to begin transfer
+	// Receiver responds with 1 or 0
+	// 1 to begin transfer. 0 to abort.
+	InitialTypeBeginTransfer = uint8(0x05)
+
+	// Transfer packet from sender to receiver.
+	InitialTypeTransferPacket = uint8(0x06)
+
+	// Text message about some issue or error or whatever
+	InitialTypeTextMessage = uint8(0x09)
+
+	// current version
+	version = byte(1)
+)
+
+var (
+	unique_code uint8
 )
 
 // Packet breakdown
@@ -27,7 +53,7 @@ type ClientHandshake struct {
 	// Sender => 0, Receiver => 1
 	Intent     uint8
 	UniqueCode uint8
-	FileSize   uint16
+	FileSize   uint64
 	ClientName string
 	Filename   string
 }
@@ -42,8 +68,8 @@ type Packet struct {
 // Every client needs to register with the server by handshaking with ClientHandshake obj
 // It is difficult to differentiate between register requests and packet transfer requests
 // Thus a special 1 byte is appended to the start of each request to indicate the type.
-func CreateRegisterRequestPacket(handshakeObj *ClientHandshake) ([]byte, error) {
-	messageType := []byte{MessageTypeRegister}
+func CreateRegisterSenderPkt(handshakeObj *ClientHandshake) ([]byte, error) {
+	messageType := []byte{InitialTypeRegisterSender}
 	requestJson, err := json.Marshal(handshakeObj)
 	if err != nil {
 		return nil, err
@@ -53,13 +79,36 @@ func CreateRegisterRequestPacket(handshakeObj *ClientHandshake) ([]byte, error) 
 	return message, nil
 }
 
+// Receiver packet
+// [initial_byte][unique_code][receiver_name]
+func CreateRegisterReceiverPkt(receiverName string, uniqueCode uint8) ([]byte, error) {
+	handshakeBuffer := new(bytes.Buffer)
+
+	// Initial byte
+	if err := binary.Write(handshakeBuffer, binary.BigEndian, InitialTypeRegisterReceiver); err != nil {
+		return nil, err
+	}
+
+	// Unique code
+	if err := binary.Write(handshakeBuffer, binary.BigEndian, uniqueCode); err != nil {
+		return nil, err
+	}
+
+	// Receiver name
+	if err := binary.Write(handshakeBuffer, binary.BigEndian, []byte(receiverName)); err != nil {
+		return nil, err
+	}
+
+	return handshakeBuffer.Bytes(), nil
+}
+
 // []byte type in go is already a reference type
 func SerializePacket(outgoingPacket *Packet) ([]byte, error) {
 	buffer := new(bytes.Buffer)
 
 	// Append an indicator byte to tell the server that this is for transfer
 	// 2 variants for register and transfer
-	if err := binary.Write(buffer, binary.BigEndian, MessageTypeTransfer); err != nil {
+	if err := binary.Write(buffer, binary.BigEndian, InitialTypeTransferPacket); err != nil {
 		return nil, err
 	}
 
@@ -122,64 +171,233 @@ func main() {
 		return
 	}
 
-	// wsUrl := "ws://localhost:4000/api/fileshare"
-	//
-	// conn, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
-	// if err != nil {
-	// 	log.Println("E:Connecting ws server.", err.Error())
-	// 	return
-	// }
-	//
-	// defer conn.Close()
+	wsUrl := "ws://localhost:4000/api/share"
 
-	senderName := "mrSender"
-	// receiverName := "mrReceiver"
+	conn, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
+	if err != nil {
+		log.Println("E:Connecting ws server.", err.Error())
+		return
+	}
+
+	defer conn.Close()
 
 	// Maybe get input
 	choice := cli_args[0]
 	if choice == "send" {
-		// Send metadata
-		// Filename, filesize, sender name
-		// TODO: Receive back some random generated code, used for receiver auth
-
-		filepath := "./local/sample_vid.mp4"
-
-		fileinfo, err := os.Stat(filepath)
-		if err != nil {
-			log.Println("E:Getting fileinfo.", err.Error())
-			return
-		}
-
-		if fileinfo.IsDir() {
-			log.Println("Must be a file.")
-			return
-		}
-
-		fmt.Printf("Sending %s [%.2fMB]\n", fileinfo.Name(), float64(fileinfo.Size())/float64(1000_000))
-
-		pkt, err := CreateRegisterRequestPacket(&ClientHandshake{
-			Version:    version,
-			Intent:     0,
-			UniqueCode: 0,
-			ClientName: senderName,
-			FileSize:   uint16(fileinfo.Size()),
-			Filename:   fileinfo.Name(),
-		})
-		if err != nil {
-			log.Println("E:Creating handshake packet.", err.Error())
-			return
-		}
-
-		fmt.Printf("% X \n", pkt)
-
-		// SendFile(filepath, conn)
+		HandleSendArg(conn)
 
 	} else if choice == "receive" {
 		// ReceiveFile(conn)
+		HandleReceiveArg(conn)
 
 	} else {
 		fmt.Println("Invalid Argument \n'tshare-client.exe send <path> | receive'")
 
+	}
+
+}
+
+// Send metadata
+// Filename, filesize, sender name
+// TODO: Receive back some random generated code, used for receiver auth
+func HandleSendArg(conn *websocket.Conn) {
+	senderName := "mrSender"
+	filepath := "./local/sample_vid.mp4"
+
+	fileinfo, err := os.Stat(filepath)
+	if err != nil {
+		log.Println("E:Getting fileinfo.", err.Error())
+		return
+	}
+
+	if fileinfo.IsDir() {
+		log.Println("Must be a file.")
+		return
+	}
+
+	fmt.Printf("Sending %s [%.2fMB]\n", fileinfo.Name(), float64(fileinfo.Size())/float64(1000_000))
+
+	pkt, err := CreateRegisterSenderPkt(&ClientHandshake{
+		Version:    version,
+		Intent:     0,
+		UniqueCode: 0,
+		ClientName: senderName,
+		FileSize:   uint64(fileinfo.Size()),
+		Filename:   fileinfo.Name(),
+	})
+	if err != nil {
+		log.Println("E:Creating handshake packet.", err.Error())
+		return
+	}
+
+	// fmt.Printf("% X \n", pkt)
+	if err := conn.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
+		log.Println("E:Writing message.", err.Error())
+		return
+	}
+
+	// Read loop
+	for {
+		_, response, err := conn.ReadMessage()
+		if err != nil {
+			log.Println("E:Reading message.", err.Error())
+			return
+		}
+
+		if len(response) == 0 {
+			log.Println("E:Server responded with nothing.")
+			conn.Close()
+			return
+		}
+
+		// Handling initial byte type
+		switch response[0] {
+		case InitialTypeUniqueCode:
+			if len(response) < 2 {
+				log.Println("E:No code provided. Closing")
+				conn.Close()
+				return
+			}
+
+			unique_code = uint8(response[1])
+			fmt.Printf("Transfer code is %d. Waiting for the receiver...\n", unique_code)
+
+		// Text response from the server
+		case InitialTypeTextMessage:
+			if len(response) > 1 {
+				fmt.Println("Server:", string(response[1:]))
+
+			}
+		}
+	}
+
+}
+
+// Metadata for receiver from server
+type MDReceiver struct {
+	FileSize   uint64
+	SenderName string
+	Filename   string
+}
+
+// TODO: Instead of the conn being passed down here, create a func called GetConn or smn
+// It attempts to connect to the server for no reason
+func HandleReceiveArg(conn *websocket.Conn) {
+	receiverName := "mrReceiver"
+
+	var resUniqueCode string
+	fmt.Println("Enter the code")
+	fmt.Scan(&resUniqueCode)
+
+	code, err := strconv.ParseUint(resUniqueCode, 10, 8)
+	if err != nil {
+		log.Println("E:Could not parse input to uint8. Invalid input.")
+		return
+	}
+
+	unique_code = uint8(code)
+	pkt, err := CreateRegisterReceiverPkt(receiverName, uint8(code))
+	if err != nil {
+		log.Println("E:Creating receiver register packet.", err.Error())
+		return
+	}
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
+		log.Println("E:Sending receiver register packet.", err.Error())
+		return
+	}
+
+	// Read loop
+	for {
+		_, response, err := conn.ReadMessage()
+		if err != nil {
+			log.Println("E:Reading message.", err.Error())
+			return
+		}
+
+		if len(response) == 0 {
+			log.Println("E:Server responded with nothing.")
+			conn.Close()
+			return
+		}
+
+		// Handling initial byte type
+		switch response[0] {
+		case InitialTypeTransferMetaData:
+			var transferMD MDReceiver
+			// Ignore the initial byte
+			if err := json.Unmarshal(response[1:], &transferMD); err != nil {
+				fmt.Println("Could not unmarshal", err.Error())
+				_ = conn.Close()
+				return
+			}
+
+			fmt.Printf("Receiving %s [%.2fMB] from %s\n", transferMD.Filename, float64(transferMD.FileSize)/float64(1000_000), transferMD.SenderName)
+
+			var res string
+			fmt.Println("Begin transfer? (y/n)")
+			fmt.Scan(&res)
+
+			var triggerByte uint8
+			if res == "yes" || res == "y" || res == "Y" {
+				triggerByte = 1
+				fmt.Println("Starting transfer")
+			} else {
+				// Abort transfer
+				fmt.Println("Aborting transfer")
+				triggerByte = 0
+			}
+
+			// Begin transfer
+			// Begintransfer from receiver packet frame
+			// [initial_byte][trigger_byte][unique_code]
+			var resBytes bytes.Buffer
+
+			if err := binary.Write(&resBytes, binary.BigEndian, InitialTypeBeginTransfer); err != nil {
+				fmt.Println("E:Creating binary response. Closing.", err.Error())
+				_ = conn.Close()
+				return
+			}
+
+			// 1 triggers transfer
+			if err := binary.Write(&resBytes, binary.BigEndian, triggerByte); err != nil {
+				fmt.Println("E:Creating binary response. Closing.", err.Error())
+				_ = conn.Close()
+				return
+			}
+
+			if err := binary.Write(&resBytes, binary.BigEndian, unique_code); err != nil {
+				fmt.Println("E:Creating binary response. Closing.", err.Error())
+				_ = conn.Close()
+				return
+			}
+
+			if err := conn.WriteMessage(websocket.BinaryMessage, resBytes.Bytes()); err != nil {
+				fmt.Println("E:Writing response. Closing.", err.Error())
+				_ = conn.Close()
+				return
+			}
+
+		case InitialTypeTransferPacket:
+			pkt, err := ParsePacket(response[1:])
+			// TODO: Add a connection close request here.
+			if err != nil {
+				log.Println("E:Parsing incoming packet. Stopping.", err.Error())
+				_ = conn.Close()
+			}
+			fmt.Println(pkt.DataSize)
+
+		// Text response from the server
+		case InitialTypeTextMessage:
+			if len(response) > 1 {
+				fmt.Println("Server:", string(response[1:]))
+
+			}
+
+		default:
+			log.Println("Random initial byte", response[0])
+			return
+		}
 	}
 
 }
