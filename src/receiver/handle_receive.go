@@ -14,7 +14,10 @@ import (
 )
 
 var (
-	unique_code uint8
+	unique_code      uint8
+	count            = 1
+	transferMD       MDReceiver
+	totalArrivedSize int
 )
 
 // Receiver packet
@@ -49,32 +52,17 @@ func CreateRegisterReceiverPkt(receiverName string, uniqueCode uint8) ([]byte, e
 // Converting to struct might be an overhead.
 // Maybe should try a more direct method.
 // TBD
-func ParsePacket(packetBytes []byte) (*shared.Packet, error) {
-	var receivedPacket shared.Packet
+func ParsePacket(packetBytes []byte) ([]byte, error) {
 	buffer := bytes.NewReader(packetBytes)
 
-	// 1 byte, version
-	if err := binary.Read(buffer, binary.BigEndian, &receivedPacket.Version); err != nil {
-		return &receivedPacket, err
+	var read_dataBytes = make([]byte, len(packetBytes))
+
+	// incomingData := len(packetBytes[6:])
+	if err := binary.Read(buffer, binary.BigEndian, &read_dataBytes); err != nil {
+		return read_dataBytes, err
 	}
 
-	// 1 byte/uint8, unique_code
-	if err := binary.Read(buffer, binary.BigEndian, &receivedPacket.UniqueCode); err != nil {
-		return &receivedPacket, err
-	}
-
-	// 4 byte/uint8, data_size
-	if err := binary.Read(buffer, binary.BigEndian, &receivedPacket.DataSize); err != nil {
-		return &receivedPacket, err
-	}
-
-	// Initialize a size of the Data, read into it normally
-	receivedPacket.Data = make([]byte, receivedPacket.DataSize)
-	if err := binary.Read(buffer, binary.BigEndian, &receivedPacket.Data); err != nil {
-		return &receivedPacket, err
-	}
-
-	return &receivedPacket, nil
+	return read_dataBytes, nil
 }
 
 // Metadata for receiver from server
@@ -112,6 +100,7 @@ func HandleReceiveArg(conn *websocket.Conn) {
 	}
 
 	filepath := "./local/received/sample_vid.mp4"
+	// filepath = "./local/received/sample.txt"
 
 	targetFile, err := os.Create(filepath)
 	if err != nil {
@@ -130,7 +119,7 @@ func HandleReceiveArg(conn *websocket.Conn) {
 		_, response, err := conn.ReadMessage()
 		if err != nil {
 			if connCloseFlag {
-				fmt.Println("Server closed the connection.")
+				fmt.Println("\nServer closed the connection.")
 				return
 			}
 
@@ -149,7 +138,6 @@ func HandleReceiveArg(conn *websocket.Conn) {
 		switch response[1] {
 		// [version][unique_code][JsonMD]
 		case shared.InitialTypeTransferMetaData:
-			var transferMD MDReceiver
 			// Ignore the initial byte
 			if err := json.Unmarshal(response[2:], &transferMD); err != nil {
 				fmt.Println("Could not unmarshal", err.Error())
@@ -176,7 +164,7 @@ func HandleReceiveArg(conn *websocket.Conn) {
 			// Begin transfer
 			// Begintransfer from receiver packet frame
 			// [initial_byte][trigger_byte][unique_code]
-			resp, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeBeginTransfer, triggerByte)
+			resp, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeRequestNextPkt, triggerByte)
 			if err != nil {
 				log.Println("E:creating binary response. Closing.", err.Error())
 				_ = conn.Close()
@@ -190,25 +178,33 @@ func HandleReceiveArg(conn *websocket.Conn) {
 			}
 
 		case shared.InitialTypeTransferPacket:
-			pkt, err := ParsePacket(response[1:])
+			count += 1
+			incomingFileChunk, err := ParsePacket(response[2:])
 			// TODO: Add a connection close request here.
 			if err != nil {
 				log.Println("E:Parsing incoming packet. Stopping.", err.Error())
-				_ = conn.Close()
+				// _ = conn.Close()
 			}
 
-			// _, message, err := conn.ReadMessage()
-			// if err != nil {
-			// 	log.Println("E:Reading chunk.", err.Error())
-			// 	return
-			// }
-
-			// fmt.Println(pkt.DataSize)
-			_, err = targetFile.Write(pkt.Data)
+			_, err = targetFile.Write(incomingFileChunk)
 			if err != nil {
 				log.Println("E:Writing data.", err.Error())
 				return
 			}
+
+			totalArrivedSize += len(response[2:])
+			fmt.Printf("\r%d/%d %s", totalArrivedSize, transferMD.FileSize, "bytes")
+			// fmt.Print("\033[0K") // Clear the line from the cursor to the end
+			resp, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeRequestNextPkt)
+			if err != nil {
+				log.Println(err.Error())
+			}
+			if err := conn.WriteMessage(websocket.BinaryMessage, resp); err != nil {
+				fmt.Println(err.Error())
+			}
+
+		case shared.InitialTypeFinishTransfer:
+			fmt.Println("Transfer finished")
 
 		// Text response from the server
 		case shared.InitialTypeTextMessage:

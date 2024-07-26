@@ -14,7 +14,14 @@ import (
 )
 
 var (
-	unique_code uint8
+	unique_code  uint8
+	fileToBeSent *os.File
+	// chunkSize    uint8 = 128
+	// chunkSize uint16 = 2048
+	// chunk uint16 = 16384
+	chunkSize uint32 = 65536
+	sendBuf          = make([]byte, chunkSize)
+	sendCount        = 1
 )
 
 // Since handshake is a 1 time thing, it will be done through json
@@ -34,6 +41,7 @@ type ClientHandshake struct {
 func HandleSendArg(conn *websocket.Conn) {
 	senderName := "mrSender"
 	filepath := "./local/sample_vid.mp4"
+	// filepath = "./local/sample.txt"
 
 	fileinfo, err := os.Stat(filepath)
 	if err != nil {
@@ -68,6 +76,14 @@ func HandleSendArg(conn *websocket.Conn) {
 	}
 
 	connCloseFlag := false
+
+	fileToBeSent, err = os.Open(filepath)
+	if err != nil {
+		log.Println("E:Opening file.", err.Error())
+		return
+	}
+
+	defer fileToBeSent.Close()
 
 	// Read loop
 	for {
@@ -124,10 +140,39 @@ func HandleSendArg(conn *websocket.Conn) {
 			var beginTransferOrNo uint8 = response[2]
 			if beginTransferOrNo == 1 {
 				fmt.Println("Starting file transfer")
-				SendFile(filepath, conn)
+				// SendFile(filepath, conn)
 
 			} else if beginTransferOrNo == 0 {
 				fmt.Println("Receiver has aborted the file transfer.")
+			}
+
+		case shared.InitialTypeRequestNextPkt:
+			pkt, isEOF, err := RequestNextPkt()
+
+			if err != nil {
+				fmt.Println("E:Getting next packet")
+				// conn.Close()
+			}
+
+			if isEOF {
+				resp, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeFinishTransfer)
+				if err != nil {
+					fmt.Println("E:Creating packet. EOF reached. Finishing transfer", err.Error())
+				}
+				if err := conn.WriteMessage(websocket.BinaryMessage, resp); err != nil {
+					fmt.Println(err.Error())
+				}
+			}
+
+			finalpkt, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeTransferPacket)
+			finalpkt = append(finalpkt, pkt...)
+
+			// buf[:n] to send only the valid portion of read data
+			// So if at the end only 9 bytes were read, we send only that 9 byte slice.
+			sendCount += 1
+			if err = conn.WriteMessage(websocket.BinaryMessage, finalpkt); err != nil {
+				log.Println("E:Sending chunk.", err.Error())
+
 			}
 
 		case shared.InitialTypeCloseConn:
@@ -154,10 +199,10 @@ func CreateRegisterSenderPkt(handshakeObj *ClientHandshake) ([]byte, error) {
 }
 
 // []byte type in go is already a reference type
-func SerializePacket(outgoingPacket *shared.Packet) ([]byte, error) {
+func SerializePacket(dataPacket []byte) ([]byte, error) {
 	buffer := new(bytes.Buffer)
 
-	if err := binary.Write(buffer, binary.BigEndian, outgoingPacket.Version); err != nil {
+	if err := binary.Write(buffer, binary.BigEndian, shared.Version); err != nil {
 		return nil, err
 	}
 
@@ -167,68 +212,43 @@ func SerializePacket(outgoingPacket *shared.Packet) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := binary.Write(buffer, binary.BigEndian, outgoingPacket.UniqueCode); err != nil {
-		return nil, err
-	}
-
-	if err := binary.Write(buffer, binary.BigEndian, outgoingPacket.DataSize); err != nil {
-		return nil, err
-	}
-
-	if err := binary.Write(buffer, binary.BigEndian, outgoingPacket.Data); err != nil {
+	if err := binary.Write(buffer, binary.BigEndian, dataPacket); err != nil {
 		return nil, err
 	}
 
 	return buffer.Bytes(), nil
 }
 
-// Refactor to send only after ack
-func SendFile(filepath string, conn *websocket.Conn) {
-	file, err := os.Open(filepath)
+func SendNextPacket() {}
+
+func InitFileForTransfer() {}
+
+// Returns the next packet from the file
+// If EOF, returns false
+func RequestNextPkt() ([]byte, bool, error) {
+	// Reads len(buf) -> 1024 bytes and stores them into buf itself
+	n, err := fileToBeSent.Read(sendBuf)
 	if err != nil {
-		log.Println("E:Opening file.", err.Error())
-		return
+		if err == io.EOF {
+			fmt.Println("Finished upload")
+			return nil, true, nil
+		}
+
+		log.Println("E:Reading file.", err.Error())
+		return nil, false, err
+
 	}
 
-	defer file.Close()
-
-	buf := make([]byte, 16384)
-	for {
-		// Reads len(buf) -> 1024 bytes and stores them into buf itself
-		n, err := file.Read(buf)
-		if err != nil {
-			if err != io.EOF {
-				log.Println("E:Reading file.", err.Error())
-			} else {
-				fmt.Println("Finished upload")
-			}
-			return
-		}
-
-		// EOF
-		if n == 0 {
-			conn.Close()
-			break
-		}
-
-		pkt_frame, err := SerializePacket(&shared.Packet{
-			Version:    shared.Version,
-			UniqueCode: unique_code,
-			DataSize:   uint16(n),
-			Data:       buf[:n],
-		})
-
-		if err != nil {
-			fmt.Println("E:Could not SerializePacket.", err.Error())
-			_ = conn.Close()
-			return
-		}
-
-		// buf[:n] to send only the valid portion of read data
-		// So if at the end only 9 bytes were read, we send only that 9 byte slice.
-		if err = conn.WriteMessage(websocket.BinaryMessage, pkt_frame); err != nil {
-			log.Println("E:Sending chunk.", err.Error())
-			return
-		}
+	// EOF
+	if n == 0 {
+		return nil, true, nil
 	}
+
+	// packet_frame, err := SerializePacket(sendBuf[:n])
+	// if err != nil {
+	// 	fmt.Println("E:Could not SerializePacket.", err.Error())
+	// 	return nil, false, nil
+	// }
+
+	return sendBuf[:n], false, nil
 }

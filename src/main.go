@@ -21,7 +21,10 @@ func main() {
 		return
 	}
 
+	handleFolderCreate()
+
 	wsUrl := "ws://localhost:4000/api/share"
+	wsUrl = "wss://multi-serve.onrender.com/api/share"
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
 	if err != nil {
@@ -44,4 +47,20 @@ func main() {
 
 	}
 
+}
+
+func handleFolderCreate() {
+	folderPath := "./local/received"
+
+	// Check if the folder exists
+	if _, err := os.Stat(folderPath); os.IsNotExist(err) {
+		// Create the folder if it doesn't exist
+		err := os.Mkdir(folderPath, 0755)
+		if err != nil {
+			fmt.Println("Error creating folder:", err)
+			return
+		}
+		fmt.Println("Folder created:", folderPath)
+	} else {
+	}
 }

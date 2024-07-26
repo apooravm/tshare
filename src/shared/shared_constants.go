@@ -27,8 +27,10 @@ const (
 	// Text message about some issue or error or whatever
 	InitialTypeTextMessage = uint8(0x09)
 
-	TestTypeSenderJoin   = uint8(0x11)
-	TestTypeReceiverJoin = uint8(0x12)
+	InitialTypeRequestNextPkt = uint8(0x10)
+	InitialTypeFinishTransfer = uint8(0x11)
+
+	InitialAbortTransfer = uint8(0x12)
 
 	// current version
 	Version = byte(1)
