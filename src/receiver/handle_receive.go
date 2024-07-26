@@ -123,7 +123,7 @@ func HandleReceiveArg(conn *websocket.Conn) {
 
 	// flag enabled after closeConn byte from server
 	// For graceful exit
-	connCloseFlag := true
+	connCloseFlag := false
 
 	// Read loop
 	for {
@@ -219,7 +219,7 @@ func HandleReceiveArg(conn *websocket.Conn) {
 		// Server sends this when it closes the connection from its side
 		// Toggle flag to exit after crash
 		case shared.InitialTypeCloseConn:
-			fmt.Println("Anyhi")
+			connCloseFlag = true
 			if len(response) == 3 {
 				fmt.Println(string(response[2:]))
 			}

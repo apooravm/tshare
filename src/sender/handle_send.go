@@ -67,10 +67,17 @@ func HandleSendArg(conn *websocket.Conn) {
 		return
 	}
 
+	connCloseFlag := false
+
 	// Read loop
 	for {
 		_, response, err := conn.ReadMessage()
 		if err != nil {
+			if connCloseFlag {
+				fmt.Println("Server closed the connection.")
+				return
+			}
+
 			log.Println("E:Reading message.", err.Error())
 			return
 		}
@@ -122,6 +129,12 @@ func HandleSendArg(conn *websocket.Conn) {
 			} else if beginTransferOrNo == 0 {
 				fmt.Println("Receiver has aborted the file transfer.")
 			}
+
+		case shared.InitialTypeCloseConn:
+			connCloseFlag = true
+			if len(response) == 3 {
+				fmt.Println(string(response[2:]))
+			}
 		}
 	}
 }
@@ -144,13 +157,13 @@ func CreateRegisterSenderPkt(handshakeObj *ClientHandshake) ([]byte, error) {
 func SerializePacket(outgoingPacket *shared.Packet) ([]byte, error) {
 	buffer := new(bytes.Buffer)
 
-	// Append an indicator byte to tell the server that this is for transfer
-	// 2 variants for register and transfer
-	if err := binary.Write(buffer, binary.BigEndian, shared.InitialTypeTransferPacket); err != nil {
+	if err := binary.Write(buffer, binary.BigEndian, outgoingPacket.Version); err != nil {
 		return nil, err
 	}
 
-	if err := binary.Write(buffer, binary.BigEndian, outgoingPacket.Version); err != nil {
+	// Append an indicator byte to tell the server that this is for transfer
+	// 2 variants for register and transfer
+	if err := binary.Write(buffer, binary.BigEndian, shared.InitialTypeTransferPacket); err != nil {
 		return nil, err
 	}
 
