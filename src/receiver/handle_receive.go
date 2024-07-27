@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/apooravm/tshare-client/src/shared"
@@ -74,8 +75,9 @@ type MDReceiver struct {
 
 // TODO: Instead of the conn being passed down here, create a func called GetConn or smn
 // It attempts to connect to the server for no reason
-func HandleReceiveArg(conn *websocket.Conn) {
-	receiverName := "mrReceiver"
+func HandleReceiveArg(receiverName, targetDirPath string) error {
+	var targetFile *os.File
+	defer targetFile.Close()
 
 	var resUniqueCode string
 	fmt.Println("Enter the code")
@@ -83,32 +85,23 @@ func HandleReceiveArg(conn *websocket.Conn) {
 
 	code, err := strconv.ParseUint(resUniqueCode, 10, 8)
 	if err != nil {
-		log.Println("E:Could not parse input to uint8. Invalid input.")
-		return
+		return fmt.Errorf("E:Could not parse input to uint8. Invalid input.")
 	}
 
 	unique_code = uint8(code)
 	pkt, err := CreateRegisterReceiverPkt(receiverName, uint8(code))
 	if err != nil {
-		log.Println("E:Creating receiver register packet.", err.Error())
-		return
+		return fmt.Errorf("E:Creating receiver register packet. %s", err.Error())
+	}
+
+	conn, err := shared.InitConnection()
+	if err != nil {
+		return fmt.Errorf("E:Could not connect. %s", err.Error())
 	}
 
 	if err := conn.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
-		log.Println("E:Sending receiver register packet.", err.Error())
-		return
+		return fmt.Errorf("E:Sending receiver register packet. %s", err.Error())
 	}
-
-	filepath := "./local/received/sample_vid.mp4"
-	// filepath = "./local/received/sample.txt"
-
-	targetFile, err := os.Create(filepath)
-	if err != nil {
-		log.Println("E:Creating target file.", err.Error())
-		return
-	}
-
-	defer targetFile.Close()
 
 	// flag enabled after closeConn byte from server
 	// For graceful exit
@@ -120,17 +113,16 @@ func HandleReceiveArg(conn *websocket.Conn) {
 		if err != nil {
 			if connCloseFlag {
 				fmt.Println("\nServer closed the connection.")
-				return
+				return nil
 			}
 
 			log.Println("E:Reading message.", err.Error())
-			return
+			shared.RequestCloseConn(conn)
 		}
 
 		if len(response) == 0 {
-			log.Println("E:Server responded with nothing.")
-			conn.Close()
-			return
+			fmt.Println("E:Server responded with nothing.")
+			shared.RequestCloseConn(conn)
 		}
 
 		// Handling initial byte type
@@ -141,8 +133,14 @@ func HandleReceiveArg(conn *websocket.Conn) {
 			// Ignore the initial byte
 			if err := json.Unmarshal(response[2:], &transferMD); err != nil {
 				fmt.Println("Could not unmarshal", err.Error())
-				_ = conn.Close()
-				return
+				shared.RequestCloseConn(conn)
+			}
+
+			// Join target dir and filename and create the file
+			finalTargetFilePath := filepath.Join(targetDirPath, transferMD.Filename)
+			targetFile, err = os.Create(finalTargetFilePath)
+			if err != nil {
+				return fmt.Errorf("E:Creating target file. %s", err.Error())
 			}
 
 			fmt.Printf("Receiving %s [%.2fMB] from %s\n", transferMD.Filename, float64(transferMD.FileSize)/float64(1000_000), transferMD.SenderName)
@@ -167,14 +165,12 @@ func HandleReceiveArg(conn *websocket.Conn) {
 			resp, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeRequestNextPkt, triggerByte)
 			if err != nil {
 				log.Println("E:creating binary response. Closing.", err.Error())
-				_ = conn.Close()
-				return
+				shared.RequestCloseConn(conn)
 			}
 
 			if err := conn.WriteMessage(websocket.BinaryMessage, resp); err != nil {
 				fmt.Println("E:Writing response. Closing.", err.Error())
-				_ = conn.Close()
-				return
+				shared.RequestCloseConn(conn)
 			}
 
 		case shared.InitialTypeTransferPacket:
@@ -182,27 +178,32 @@ func HandleReceiveArg(conn *websocket.Conn) {
 			incomingFileChunk, err := ParsePacket(response[2:])
 			// TODO: Add a connection close request here.
 			if err != nil {
-				log.Println("E:Parsing incoming packet. Stopping.", err.Error())
+				fmt.Println("E:Parsing incoming packet. Stopping.", err.Error())
 				// _ = conn.Close()
 			}
 
 			_, err = targetFile.Write(incomingFileChunk)
 			if err != nil {
-				log.Println("E:Writing data.", err.Error())
-				return
+				fmt.Println("E:Writing data.", err.Error())
+				shared.RequestCloseConn(conn)
 			}
 
 			totalArrivedSize += len(response[2:])
 			fmt.Printf("\r%d/%d %s", totalArrivedSize, transferMD.FileSize, "bytes")
+
 			// fmt.Print("\033[0K") // Clear the line from the cursor to the end
 			resp, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeRequestNextPkt)
 			if err != nil {
-				log.Println(err.Error())
-			}
-			if err := conn.WriteMessage(websocket.BinaryMessage, resp); err != nil {
-				fmt.Println(err.Error())
+				fmt.Println("\nE:Creating file chunks.", err.Error())
+				shared.RequestCloseConn(conn)
 			}
 
+			if err := conn.WriteMessage(websocket.BinaryMessage, resp); err != nil {
+				fmt.Println("\nE:Writing file chunk.", err.Error())
+				shared.RequestCloseConn(conn)
+			}
+
+		// Disconnection done by server
 		case shared.InitialTypeFinishTransfer:
 			fmt.Println("Transfer finished")
 
@@ -222,7 +223,7 @@ func HandleReceiveArg(conn *websocket.Conn) {
 
 		default:
 			log.Println("Random initial byte", response[0])
-			return
+			shared.RequestCloseConn(conn)
 		}
 	}
 
@@ -233,4 +234,7 @@ func ReceiveFile(conn *websocket.Conn) {
 
 func VoluntaryDisconnect(conn *websocket.Conn) {
 
+}
+
+func CreateTargetFile() {
 }

@@ -16,12 +16,9 @@ import (
 var (
 	unique_code  uint8
 	fileToBeSent *os.File
-	// chunkSize    uint8 = 128
-	// chunkSize uint16 = 2048
-	// chunk uint16 = 16384
-	chunkSize uint32 = 65536
-	sendBuf          = make([]byte, chunkSize)
-	sendCount        = 1
+	// sendBuf          = make([]byte, chunkSize)
+	sendBuf   []byte
+	sendCount = 1
 )
 
 // Since handshake is a 1 time thing, it will be done through json
@@ -38,49 +35,38 @@ type ClientHandshake struct {
 // Send metadata
 // Filename, filesize, sender name
 // TODO: Receive back some random generated code, used for receiver auth
-func HandleSendArg(conn *websocket.Conn) {
-	senderName := "mrSender"
-	filepath := "./local/sample_vid.mp4"
-	// filepath = "./local/sample.txt"
-
-	fileinfo, err := os.Stat(filepath)
-	if err != nil {
-		log.Println("E:Getting fileinfo.", err.Error())
-		return
-	}
-
-	if fileinfo.IsDir() {
-		log.Println("Must be a file.")
-		return
-	}
-
-	fmt.Printf("Sending %s [%.2fMB]\n", fileinfo.Name(), float64(fileinfo.Size())/float64(1000_000))
+func HandleSendArg(chunkSize uint32, fileSize int64, senderName, filepath, fileName string) error {
+	sendBuf = make([]byte, chunkSize)
 
 	pkt, err := CreateRegisterSenderPkt(&ClientHandshake{
 		Version:    shared.Version,
 		Intent:     0,
 		UniqueCode: 0,
 		ClientName: senderName,
-		FileSize:   uint64(fileinfo.Size()),
-		Filename:   fileinfo.Name(),
+		FileSize:   uint64(fileSize),
+		Filename:   fileName,
 	})
 	if err != nil {
-		log.Println("E:Creating handshake packet.", err.Error())
-		return
+		return fmt.Errorf("E:Creating handshake packet. %s", err.Error())
 	}
+
+	conn, err := shared.InitConnection()
+	if err != nil {
+		return fmt.Errorf("E:Could not connect. %s", err.Error())
+	}
+
+	defer conn.Close()
 
 	// fmt.Printf("% X \n", pkt)
 	if err := conn.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
-		log.Println("E:Writing message.", err.Error())
-		return
+		return fmt.Errorf("E:Writing to server. %s", err.Error())
 	}
 
 	connCloseFlag := false
 
 	fileToBeSent, err = os.Open(filepath)
 	if err != nil {
-		log.Println("E:Opening file.", err.Error())
-		return
+		return fmt.Errorf("E:Opening file. %s", err.Error())
 	}
 
 	defer fileToBeSent.Close()
@@ -90,18 +76,15 @@ func HandleSendArg(conn *websocket.Conn) {
 		_, response, err := conn.ReadMessage()
 		if err != nil {
 			if connCloseFlag {
-				fmt.Println("Server closed the connection.")
-				return
+				fmt.Println("Connection closed.")
 			}
 
-			log.Println("E:Reading message.", err.Error())
-			return
+			return fmt.Errorf("E:Reading server response. %s", err.Error())
 		}
 
 		if len(response) == 0 {
-			log.Println("E:Server responded with nothing.")
-			conn.Close()
-			return
+			log.Println("Server responded with nothing.")
+			shared.RequestCloseConn(conn)
 		}
 
 		// first byte will always be the version
@@ -112,9 +95,8 @@ func HandleSendArg(conn *websocket.Conn) {
 		// [version][initial_byte][unique_code]
 		case shared.InitialTypeUniqueCode:
 			if len(response) < 3 {
-				log.Println("E:No code provided. Closing")
-				conn.Close()
-				return
+				log.Println("Server responded with no code.")
+				shared.RequestCloseConn(conn)
 			}
 
 			unique_code = uint8(response[2])
@@ -127,30 +109,12 @@ func HandleSendArg(conn *websocket.Conn) {
 
 			}
 
-		// response[1] -> Begin transfer
-		// reponse[1] -> Abrort transfer
-		// [versioj][initial_byte][beginTransferOrNo]
-		case shared.InitialTypeBeginTransfer:
-			if len(response) < 3 {
-				log.Println("E:Server responded with nothing.")
-				_ = conn.Close()
-				return
-			}
-
-			var beginTransferOrNo uint8 = response[2]
-			if beginTransferOrNo == 1 {
-				fmt.Println("Starting file transfer")
-				// SendFile(filepath, conn)
-
-			} else if beginTransferOrNo == 0 {
-				fmt.Println("Receiver has aborted the file transfer.")
-			}
-
 		case shared.InitialTypeRequestNextPkt:
 			pkt, isEOF, err := RequestNextPkt()
 
 			if err != nil {
 				fmt.Println("E:Getting next packet")
+				shared.RequestCloseConn(conn)
 				// conn.Close()
 			}
 
@@ -158,9 +122,12 @@ func HandleSendArg(conn *websocket.Conn) {
 				resp, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeFinishTransfer)
 				if err != nil {
 					fmt.Println("E:Creating packet. EOF reached. Finishing transfer", err.Error())
+					shared.RequestCloseConn(conn)
 				}
+
 				if err := conn.WriteMessage(websocket.BinaryMessage, resp); err != nil {
-					fmt.Println(err.Error())
+					fmt.Println("E:Writing to server.", err.Error())
+					shared.RequestCloseConn(conn)
 				}
 			}
 
@@ -172,6 +139,7 @@ func HandleSendArg(conn *websocket.Conn) {
 			sendCount += 1
 			if err = conn.WriteMessage(websocket.BinaryMessage, finalpkt); err != nil {
 				log.Println("E:Sending chunk.", err.Error())
+				shared.RequestCloseConn(conn)
 
 			}
 

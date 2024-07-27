@@ -19,6 +19,7 @@ vendor/
 
 # Local
 local/
+received/
 
 # Go workspace file
 go.work
