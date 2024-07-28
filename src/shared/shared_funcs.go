@@ -21,10 +21,7 @@ func CreateBinaryPacket(parts ...any) ([]byte, error) {
 
 // Returns the connected ws
 func InitConnection() (*websocket.Conn, error) {
-	wsUrl := "ws://localhost:4000/api/share"
-	wsUrl = "wss://multi-serve.onrender.com/api/share"
-
-	conn, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
+	conn, _, err := websocket.DefaultDialer.Dial(Endpoint, nil)
 	if err != nil {
 		log.Println("E:Connecting ws server.", err.Error())
 		return nil, err

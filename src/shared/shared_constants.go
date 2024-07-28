@@ -36,6 +36,10 @@ const (
 	Version = byte(1)
 )
 
+var (
+	Endpoint = "wss://multi-serve.onrender.com/api/share"
+)
+
 type Packet struct {
 	Version    byte
 	UniqueCode byte

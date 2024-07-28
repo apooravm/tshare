@@ -9,6 +9,7 @@ import (
 
 	"github.com/apooravm/tshare-client/src/receiver"
 	"github.com/apooravm/tshare-client/src/sender"
+	"github.com/apooravm/tshare-client/src/shared"
 )
 
 var (
@@ -113,6 +114,7 @@ func PrintHelp() {
 	fmt.Println("\nSubcommands - Attach these at the end")
 	fmt.Println("Set a custom chunk size. '-chunk=<CHUNK_SIZE>'")
 	fmt.Println("Set a custom client name. '-name=<NAME>'")
+	fmt.Println("Set to dev mode. '-mode=dev'")
 }
 
 func handleFolderCreate() {
@@ -152,6 +154,12 @@ func handleFlags() error {
 
 		case "name":
 			client_name = argParts[1]
+
+		// Settint to devmode
+		case "mode":
+			if argParts[1] == "dev" {
+				shared.Endpoint = "ws://localhost:4000/api/share"
+			}
 
 		default:
 			fmt.Println("Invalid flag")
