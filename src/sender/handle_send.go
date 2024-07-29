@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
+	"strconv"
 
 	"github.com/apooravm/tshare-client/src/shared"
 	"github.com/gorilla/websocket"
@@ -32,10 +34,33 @@ type ClientHandshake struct {
 	Filename   string
 }
 
+func HandleSendArg(chunkSize uint32, filesize int64, senderName string, allFileInfo *[]shared.FileInfo) error {
+	paramQuery := url.Values{}
+
+	for _, info := range *allFileInfo {
+		infoValue := fmt.Sprintf("%s,%s", info.RelativePath, strconv.Itoa(int(info.Size)))
+		paramQuery.Add("fileinfo", infoValue)
+	}
+
+	paramQuery.Add("intent", "send")
+	paramQuery.Add("sendername", senderName)
+
+	finalURL := fmt.Sprintf("%s?%s", shared.Endpoint, paramQuery.Encode())
+
+	conn, err := shared.InitConnection(finalURL)
+	if err != nil {
+		return err
+	}
+
+	defer conn.Close()
+
+	return nil
+}
+
 // Send metadata
 // Filename, filesize, sender name
 // TODO: Receive back some random generated code, used for receiver auth
-func HandleSendArg(chunkSize uint32, fileSize int64, senderName, filepath, fileName string) error {
+func HandleConn(chunkSize uint32, fileSize int64, senderName, filepath, fileName string) error {
 	sendBuf = make([]byte, chunkSize)
 
 	pkt, err := CreateRegisterSenderPkt(&ClientHandshake{
@@ -50,13 +75,14 @@ func HandleSendArg(chunkSize uint32, fileSize int64, senderName, filepath, fileN
 		return fmt.Errorf("E:Creating handshake packet. %s", err.Error())
 	}
 
-	conn, err := shared.InitConnection()
+	conn, err := shared.InitConnection(shared.Endpoint)
 	if err != nil {
 		return fmt.Errorf("E:Could not connect. %s", err.Error())
 	}
 
 	defer conn.Close()
 
+	return nil
 	// fmt.Printf("% X \n", pkt)
 	if err := conn.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
 		return fmt.Errorf("E:Writing to server. %s", err.Error())

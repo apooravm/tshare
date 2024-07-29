@@ -46,3 +46,12 @@ type Packet struct {
 	DataSize   uint16
 	Data       []byte
 }
+
+type FileInfo struct {
+	Name string
+	// Relative to the target folder.
+	RelativePath string
+	// Abs path of the file in the system.
+	AbsPath string
+	Size    uint64
+}

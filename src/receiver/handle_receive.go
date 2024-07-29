@@ -94,7 +94,7 @@ func HandleReceiveArg(receiverName, targetDirPath string) error {
 		return fmt.Errorf("E:Creating receiver register packet. %s", err.Error())
 	}
 
-	conn, err := shared.InitConnection()
+	conn, err := shared.InitConnection(shared.Endpoint)
 	if err != nil {
 		return fmt.Errorf("E:Could not connect. %s", err.Error())
 	}

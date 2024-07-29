@@ -60,17 +60,21 @@ func handleArgs() {
 			return
 		}
 
-		if fileinfo.IsDir() {
-			fmt.Println("Target must be a file.")
-			return
-		}
-
 		if client_name == "" {
 			client_name = "Sender"
 		}
 
-		fmt.Printf("Sending %s [%.2fMB]. %d bytes per packet.\n", fileinfo.Name(), float64(fileinfo.Size())/float64(1000_000), chunkSize)
-		sender.HandleSendArg(uint32(chunkSize), fileinfo.Size(), client_name, targetPath, fileinfo.Name())
+		allFileInfo, err := shared.GetAllFileInfo(targetPath)
+		if err != nil {
+			fmt.Println(err.Error())
+			return
+		}
+
+		if len(*allFileInfo) == 1 {
+			fmt.Printf("Sending %s [%.2fMB]. %d bytes per packet.\n", fileinfo.Name(), float64(fileinfo.Size())/float64(1000_000), chunkSize)
+		}
+
+		sender.HandleSendArg(uint32(chunkSize), fileinfo.Size(), client_name, allFileInfo)
 
 	case "receive":
 		if len(os.Args) > 2 && os.Args[2][0] != '-' {
