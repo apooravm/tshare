@@ -76,7 +76,7 @@ func HandleSendArg(chunkSize uint32, fileSize int64, senderName, filepath, fileN
 		_, response, err := conn.ReadMessage()
 		if err != nil {
 			if connCloseFlag {
-				fmt.Println("Connection closed.")
+				fmt.Println("Server closed the connection.")
 			}
 
 			return fmt.Errorf("E:Reading server response. %s", err.Error())

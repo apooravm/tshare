@@ -73,7 +73,7 @@ func handleArgs() {
 		sender.HandleSendArg(uint32(chunkSize), fileinfo.Size(), client_name, targetPath, fileinfo.Name())
 
 	case "receive":
-		if len(os.Args) > 2 {
+		if len(os.Args) > 2 && os.Args[2][0] != '-' {
 			receivePath = os.Args[2]
 		}
 

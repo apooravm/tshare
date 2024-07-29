@@ -107,6 +107,9 @@ func HandleReceiveArg(receiverName, targetDirPath string) error {
 	// For graceful exit
 	connCloseFlag := false
 
+	var singleblip int
+	transferStarted := false
+
 	// Read loop
 	for {
 		_, response, err := conn.ReadMessage()
@@ -135,6 +138,8 @@ func HandleReceiveArg(receiverName, targetDirPath string) error {
 				fmt.Println("Could not unmarshal", err.Error())
 				shared.RequestCloseConn(conn)
 			}
+
+			singleblip = int(transferMD.FileSize) / 20
 
 			// Join target dir and filename and create the file
 			finalTargetFilePath := filepath.Join(targetDirPath, transferMD.Filename)
@@ -189,7 +194,25 @@ func HandleReceiveArg(receiverName, targetDirPath string) error {
 			}
 
 			totalArrivedSize += len(response[2:])
-			fmt.Printf("\r%d/%d %s", totalArrivedSize, transferMD.FileSize, "bytes")
+
+			fillSize := totalArrivedSize / singleblip
+			fill_container := ""
+			for i := 0; i < 20; i++ {
+				if i < fillSize {
+					fill_container += "#"
+				} else {
+					fill_container += "-"
+				}
+			}
+
+			if !transferStarted {
+				fmt.Printf("%s\n%.2f/%.2f kb received", fill_container, float64(totalArrivedSize)/float64(1000), float64(transferMD.FileSize)/float64(1000))
+				transferStarted = true
+			} else {
+				fmt.Printf("\033[F%s\n%.2f/%.2f kb received", fill_container, float64(totalArrivedSize)/float64(1000), float64(transferMD.FileSize)/float64(1000))
+			}
+
+			// fmt.Printf("\r%d/%d %s", totalArrivedSize, transferMD.FileSize, "bytes")
 
 			// fmt.Print("\033[0K") // Clear the line from the cursor to the end
 			resp, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeRequestNextPkt)
@@ -205,7 +228,7 @@ func HandleReceiveArg(receiverName, targetDirPath string) error {
 
 		// Disconnection done by server
 		case shared.InitialTypeFinishTransfer:
-			fmt.Println("Transfer finished")
+			fmt.Println("\nTransfer finished")
 
 		// Text response from the server
 		case shared.InitialTypeTextMessage:
