@@ -114,6 +114,7 @@ func HandleReceiverConn(conn *websocket.Conn) error {
 		if err != nil {
 			if CLOSE_CONN {
 				fmt.Println("Server closed the connection.")
+				// No error is returned, graceful disconnect
 				return nil
 			}
 
@@ -124,7 +125,7 @@ func HandleReceiverConn(conn *websocket.Conn) error {
 		switch message[1] {
 		case shared.InitialTypeTextMessage:
 			if len(message) > 2 {
-				fmt.Printf("%s %s\n", shared.ColourSprintf("Sender:", "cyan", false), string(message[2:]))
+				fmt.Printf("%s %s\n", shared.ColourSprintf("Server:", "cyan", false), string(message[2:]))
 			}
 
 		case shared.InitialTypeCloseConnNotify:

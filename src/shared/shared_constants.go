@@ -53,6 +53,9 @@ const (
 	// Server notifies the client that the connection is going to be closed.
 	InitialTypeCloseConnNotify = uint8(0x27)
 
+	// Server responds back to sender with the transfer code
+	InitialTypeTransferCode = uint8(0x28)
+
 	// current version
 	Version = byte(1)
 )

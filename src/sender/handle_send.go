@@ -21,6 +21,8 @@ var (
 	// sendBuf          = make([]byte, chunkSize)
 	sendBuf   []byte
 	sendCount = 1
+	// Toggled to true when server notifies that its about to close the connection.
+	CLOSE_CONN = false
 )
 
 // Since handshake is a 1 time thing, it will be done through json
@@ -53,14 +55,51 @@ func HandleSendArg(chunkSize uint32, filesize int64, senderName string, allFileI
 	}
 
 	defer conn.Close()
+	if err := HandleSenderConn(conn); err != nil {
+		fmt.Println(err.Error())
+	}
 
 	return nil
+}
+
+func HandleSenderConn(conn *websocket.Conn) error {
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			if CLOSE_CONN {
+				fmt.Println("Server closed the connection.")
+				return nil
+			}
+
+			fmt.Println("Connection closed.")
+			return err
+		}
+
+		switch message[1] {
+		case shared.InitialTypeTransferCode:
+			if len(message) < 3 {
+				// Idk request disconnection or smn
+			}
+
+			unique_code = message[2]
+			fmt.Println("Transfer code is", unique_code)
+
+		case shared.InitialTypeTextMessage:
+			if len(message) > 2 {
+				fmt.Printf("%s %s\n", shared.ColourSprintf("Server:", "cyan", false), string(message[2:]))
+			}
+
+		case shared.InitialTypeCloseConnNotify:
+			CLOSE_CONN = true
+		}
+
+	}
 }
 
 // Send metadata
 // Filename, filesize, sender name
 // TODO: Receive back some random generated code, used for receiver auth
-func HandleConn(chunkSize uint32, fileSize int64, senderName, filepath, fileName string) error {
+func HandleConn2(chunkSize uint32, fileSize int64, senderName, filepath, fileName string) error {
 	sendBuf = make([]byte, chunkSize)
 
 	pkt, err := CreateRegisterSenderPkt(&ClientHandshake{
