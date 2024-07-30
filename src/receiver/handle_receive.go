@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +20,8 @@ var (
 	count            = 1
 	transferMD       MDReceiver
 	totalArrivedSize int
+	// Toggled to true when server notifies that its about to close the connection.
+	CLOSE_CONN = false
 )
 
 // Receiver packet
@@ -73,9 +76,67 @@ type MDReceiver struct {
 	Filename   string
 }
 
+func HandleReceiveArg(receiverName, targetDirPath string) error {
+	var resUniqueCode string
+	fmt.Println("Enter the code")
+	fmt.Scan(&resUniqueCode)
+
+	code, err := strconv.ParseUint(resUniqueCode, 10, 8)
+	if err != nil {
+		return fmt.Errorf("E:Could not parse input to uint8. Invalid input.")
+	}
+
+	unique_code = uint8(code)
+
+	queryParams := url.Values{}
+	queryParams.Add("intent", "receive")
+	queryParams.Add("code", strconv.Itoa(int(code)))
+	queryParams.Add("receivername", receiverName)
+
+	finalURL := fmt.Sprintf("%s?%s", shared.Endpoint, queryParams.Encode())
+	conn, err := shared.InitConnection(finalURL)
+	if err != nil {
+		return err
+	}
+
+	defer conn.Close()
+
+	if err := HandleReceiverConn(conn); err != nil {
+		fmt.Println(err.Error())
+	}
+
+	return nil
+}
+
+func HandleReceiverConn(conn *websocket.Conn) error {
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			if CLOSE_CONN {
+				fmt.Println("Server closed the connection.")
+				return nil
+			}
+
+			fmt.Println("Connection closed.")
+			return err
+		}
+
+		switch message[1] {
+		case shared.InitialTypeTextMessage:
+			if len(message) > 2 {
+				fmt.Printf("%s %s\n", shared.ColourSprintf("Sender:", "cyan", false), string(message[2:]))
+			}
+
+		case shared.InitialTypeCloseConnNotify:
+			CLOSE_CONN = true
+		}
+
+	}
+}
+
 // TODO: Instead of the conn being passed down here, create a func called GetConn or smn
 // It attempts to connect to the server for no reason
-func HandleReceiveArg(receiverName, targetDirPath string) error {
+func HandleConn2(receiverName, targetDirPath string) error {
 	var targetFile *os.File
 	defer targetFile.Close()
 
@@ -89,14 +150,21 @@ func HandleReceiveArg(receiverName, targetDirPath string) error {
 	}
 
 	unique_code = uint8(code)
+
+	queryParams := url.Values{}
+	queryParams.Add("intent", "receive")
+	queryParams.Add("code", strconv.Itoa(int(code)))
+	queryParams.Add("receivername", receiverName)
+
+	finalURL := fmt.Sprintf("%s?%s", shared.Endpoint, queryParams.Encode())
+	conn, err := shared.InitConnection(finalURL)
+	if err != nil {
+		return err
+	}
+
 	pkt, err := CreateRegisterReceiverPkt(receiverName, uint8(code))
 	if err != nil {
 		return fmt.Errorf("E:Creating receiver register packet. %s", err.Error())
-	}
-
-	conn, err := shared.InitConnection(shared.Endpoint)
-	if err != nil {
-		return fmt.Errorf("E:Could not connect. %s", err.Error())
 	}
 
 	if err := conn.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
