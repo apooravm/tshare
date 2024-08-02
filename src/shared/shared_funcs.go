@@ -57,11 +57,16 @@ func GetAllFileInfo(targetPath string) (*[]FileInfo, error) {
 		return nil, fmt.Errorf("E:Getting provided path info. %s", err.Error())
 	}
 
+	var id_count uint8 = 1
+
 	// Return single file with its name and size
 	if !targetPathInfo.IsDir() {
 		allFileInfo = append(allFileInfo, FileInfo{
-			Name: targetPathInfo.Name(),
-			Size: uint64(targetPathInfo.Size()),
+			Name:         targetPathInfo.Name(),
+			Size:         uint64(targetPathInfo.Size()),
+			RelativePath: targetPathInfo.Name(),
+			AbsPath:      targetPath,
+			Id:           id_count,
 		})
 
 		return &allFileInfo, nil
@@ -98,7 +103,10 @@ func GetAllFileInfo(targetPath string) (*[]FileInfo, error) {
 				Size:         uint64(info.Size()),
 				AbsPath:      absFilePath,
 				RelativePath: pathRelativeToTargetFolder,
+				Id:           id_count,
 			})
+
+			id_count += 1
 		}
 
 		return nil

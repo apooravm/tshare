@@ -14,8 +14,14 @@ import (
 
 var (
 	receivePath = "./received"
+	pbType      = "total"
+	pbRGBOn     = false
+	pbLength    = 20
+	pbIsMB      = false
+	pbOff       = false
 	client_name string
-	chunkSize   uint32 = 262144
+	// chunkSize   uint32 = 262144
+	chunkSize uint32 = 128
 	// chunkSize    uint8 = 128
 	// chunkSize uint16 = 2048
 	// chunk uint16 = 16384
@@ -70,11 +76,16 @@ func handleArgs() {
 			return
 		}
 
+		if len(*allFileInfo) == 0 {
+			fmt.Println("Target empty.")
+			return
+		}
+
 		if len(*allFileInfo) == 1 {
 			fmt.Printf("Sending %s [%.2fMB]. %d bytes per packet.\n", fileinfo.Name(), float64(fileinfo.Size())/float64(1000_000), chunkSize)
 		}
 
-		sender.HandleSendArg(uint32(chunkSize), fileinfo.Size(), client_name, allFileInfo)
+		sender.HandleSendArg(uint32(chunkSize), fileinfo.Size(), client_name, allFileInfo, pbType, pbRGBOn, pbIsMB, pbLength, pbOff)
 
 	case "receive":
 		if len(os.Args) > 2 && os.Args[2][0] != '-' {
@@ -98,7 +109,7 @@ func handleArgs() {
 			client_name = "Receiver"
 		}
 
-		receiver.HandleReceiveArg(client_name, receivePath)
+		receiver.HandleReceiveArg(client_name, receivePath, pbType, pbRGBOn, pbIsMB, pbLength, pbOff)
 
 	case "help":
 		PrintHelp()
@@ -119,8 +130,14 @@ func PrintHelp() {
 	fmt.Println("Set a custom chunk size. '-chunk=<CHUNK_SIZE>'")
 	fmt.Println("Set a custom client name. '-name=<NAME>'")
 	fmt.Println("Set to dev mode. '-mode=dev'")
+	fmt.Println("Set progress bar type. all/single '-pbtype=single'")
+	fmt.Println("Set progress bar length. Default is 20. '-pblen=50'")
+	fmt.Println("Set progress bar rgb colouring. rgb/normal '-pbcolour=rgb'")
+	fmt.Println("Set progress bar size unit. mb/kb '-pbunit=mb'")
+	fmt.Println("Turn off the progress bar. '-pb=off'")
 }
 
+// Not really needed anymore
 func handleFolderCreate() {
 	// Check if the folder exists
 	if _, err := os.Stat(receivePath); os.IsNotExist(err) {
@@ -163,6 +180,49 @@ func handleFlags() error {
 		case "mode":
 			if argParts[1] == "dev" {
 				shared.Endpoint = "ws://localhost:4000/api/share"
+			}
+
+		case "pbtype":
+			switch argParts[1] {
+			case "total":
+				pbType = "total"
+			case "single":
+				pbType = "single"
+			default:
+				return fmt.Errorf("Invalid progress bar type. Must be total/single.")
+			}
+
+		case "pblen":
+			pbLen, err := strconv.ParseInt(argParts[1], 10, 16)
+			if err != nil {
+				return fmt.Errorf("Invalid progress bar length size.")
+			}
+
+			pbLength = int(pbLen)
+
+		case "pbcolour":
+			switch argParts[1] {
+			case "normal":
+			case "rgb":
+				pbRGBOn = true
+			default:
+				return fmt.Errorf("Invalid progress bar colour type. Must be normal/rgb.")
+			}
+
+		case "pbunit":
+			switch argParts[1] {
+			case "kb":
+			case "mb":
+				pbIsMB = true
+			default:
+				return fmt.Errorf("Invalid progress bar size unit. Must be kb/mb.")
+			}
+
+		case "pb":
+			if argParts[1] != "off" {
+				return fmt.Errorf("Invalid progress bar arg. Must be off.")
+			} else {
+				pbOff = true
 			}
 
 		default:

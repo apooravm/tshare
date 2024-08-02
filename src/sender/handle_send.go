@@ -1,12 +1,8 @@
 package sender
 
 import (
-	"bytes"
-	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/url"
 	"os"
 	"strconv"
@@ -18,11 +14,32 @@ import (
 var (
 	unique_code  uint8
 	fileToBeSent *os.File
-	// sendBuf          = make([]byte, chunkSize)
-	sendBuf   []byte
-	sendCount = 1
+	chunkSize    uint32
+	sendBuf      []byte
+	sendCount    = 1
 	// Toggled to true when server notifies that its about to close the connection.
-	CLOSE_CONN = false
+	CLOSE_CONN          = false
+	activeFileIdx       uint8
+	activeFileBeingSent *os.File
+	filesBeingSent      *[]shared.FileInfo
+	fileDataPacket      []byte
+	// Keep track of file ids sent
+	FileIdsSent       []uint8
+	CurrFileBeingSent *shared.FileInfo
+	TotalFilesSize    int
+	CurrFileSentSize  int
+	TotalFileSentSize int
+
+	allFilesTotalSize  int
+	allFilesSentSize   int
+	allFilesSingleBlip int
+
+	currFileSentSize   int
+	currFileSingleBlip int
+
+	transferStarted bool
+
+	progressBar *shared.ProgressBar
 )
 
 // Since handshake is a 1 time thing, it will be done through json
@@ -36,13 +53,20 @@ type ClientHandshake struct {
 	Filename   string
 }
 
-func HandleSendArg(chunkSize uint32, filesize int64, senderName string, allFileInfo *[]shared.FileInfo) error {
+func HandleSendArg(chunk_size uint32, filesize int64, senderName string, allFileInfo *[]shared.FileInfo, pbType string, pbRGBOn, pbIsMB bool, pbLength int, pbOff bool) error {
 	paramQuery := url.Values{}
+	filesBeingSent = allFileInfo
+	chunkSize = chunk_size
+
+	totalFileSize := 0
 
 	for _, info := range *allFileInfo {
-		infoValue := fmt.Sprintf("%s,%s", info.RelativePath, strconv.Itoa(int(info.Size)))
+		totalFileSize += int(info.Size)
+		infoValue := fmt.Sprintf("%s,%s,%d", info.RelativePath, strconv.Itoa(int(info.Size)), info.Id)
 		paramQuery.Add("fileinfo", infoValue)
 	}
+
+	progressBar = shared.NewProgressBar(totalFileSize, pbType, pbLength, pbRGBOn, "", pbIsMB, pbOff)
 
 	paramQuery.Add("intent", "send")
 	paramQuery.Add("sendername", senderName)
@@ -52,6 +76,17 @@ func HandleSendArg(chunkSize uint32, filesize int64, senderName string, allFileI
 	conn, err := shared.InitConnection(finalURL)
 	if err != nil {
 		return err
+	}
+
+	if len(*allFileInfo) > 1 {
+		shared.ColourPrint("Sending files", "yellow")
+	} else {
+
+		shared.ColourPrint("Sending file", "yellow")
+	}
+
+	for _, file := range *allFileInfo {
+		fmt.Printf("%d  %s - %s\n", file.Id, shared.ColourSprintf(fmt.Sprintf("[%.2fMB]", float64(file.Size)/float64(1000_000)), "yellow", false), file.RelativePath)
 	}
 
 	defer conn.Close()
@@ -84,11 +119,50 @@ func HandleSenderConn(conn *websocket.Conn) error {
 			unique_code = message[2]
 			fmt.Println("Transfer code is", unique_code)
 
+		// TODO: If id not found, reply ...
+		case shared.InitialTypeStartTransferWithId:
+			var fileId uint8 = message[2]
+			fileFound := false
+			for _, beingSentFile := range *filesBeingSent {
+				if beingSentFile.Id == fileId {
+					CurrFileBeingSent = &beingSentFile
+					file, err := os.Open(beingSentFile.AbsPath)
+					if err != nil {
+						// Abort operation?
+						fmt.Println("Err opening file...")
+						continue
+					}
+
+					progressBar.UpdateOngoingForNewFile(int(beingSentFile.Size))
+					currFileSingleBlip = int(beingSentFile.Size) / 20
+					sendBuf = make([]byte, chunkSize)
+					activeFileBeingSent = file
+					fileFound = true
+				}
+			}
+
+			if !fileFound {
+				fmt.Println("File not found, id", fileId)
+
+			} else {
+				if err := SendNextPacket(conn); err != nil {
+					fmt.Println("Could not send file chunk.", err.Error())
+					continue
+				}
+			}
+
+		case shared.InitialTypeRequestNextPacket:
+			if err := SendNextPacket(conn); err != nil {
+				fmt.Println("Could not send file chunk.", err.Error())
+				continue
+			}
+
 		case shared.InitialTypeTextMessage:
 			if len(message) > 2 {
 				fmt.Printf("%s %s\n", shared.ColourSprintf("Server:", "cyan", false), string(message[2:]))
 			}
 
+		// Only used to toggle this flag, which doesnt throw error when conn is closed.
 		case shared.InitialTypeCloseConnNotify:
 			CLOSE_CONN = true
 		}
@@ -96,178 +170,65 @@ func HandleSenderConn(conn *websocket.Conn) error {
 	}
 }
 
-// Send metadata
-// Filename, filesize, sender name
-// TODO: Receive back some random generated code, used for receiver auth
-func HandleConn2(chunkSize uint32, fileSize int64, senderName, filepath, fileName string) error {
-	sendBuf = make([]byte, chunkSize)
-
-	pkt, err := CreateRegisterSenderPkt(&ClientHandshake{
-		Version:    shared.Version,
-		Intent:     0,
-		UniqueCode: 0,
-		ClientName: senderName,
-		FileSize:   uint64(fileSize),
-		Filename:   fileName,
-	})
+func SendNextPacket(conn *websocket.Conn) error {
+	fileBytes, isEOF, err := GetNextFileBytes()
 	if err != nil {
-		return fmt.Errorf("E:Creating handshake packet. %s", err.Error())
+		// Abort?
+		fmt.Println("E:Reading file.", err.Error())
 	}
 
-	conn, err := shared.InitConnection(shared.Endpoint)
-	if err != nil {
-		return fmt.Errorf("E:Could not connect. %s", err.Error())
+	if isEOF {
+		progressBar.PrintPostDoneMessage(fmt.Sprintf("Finished uploading file %s", CurrFileBeingSent.RelativePath))
+		FileIdsSent = append(FileIdsSent, CurrFileBeingSent.Id)
+		transferStarted = false
+
+		currFileTransferDonePkt, _ := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeSingleFileTransferFinish)
+		if err := conn.WriteMessage(websocket.BinaryMessage, currFileTransferDonePkt); err != nil {
+			fmt.Println("E:Sending single file transfer finish ping. Forcing disconnect.\n", err.Error())
+			_ = conn.Close()
+			return err
+		}
+
+		// If all files transferred
+		if len(FileIdsSent) == len(*filesBeingSent) {
+			fmt.Println()
+			allFilesTransferPkt, _ := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeAllTransferFinish)
+			if err := conn.WriteMessage(websocket.BinaryMessage, allFilesTransferPkt); err != nil {
+				fmt.Println("E:Sending single file transfer finish ping. Forcing disconnect.\n", err.Error())
+				_ = conn.Close()
+				return err
+			}
+		}
+
+		return nil
 	}
 
-	defer conn.Close()
+	progressBar.UpdateTransferredSize(len(fileBytes))
+	progressBar.Show()
+
+	fileDataPacket, err = shared.CreateBinaryPacket(shared.Version, shared.InitialTypeTransferPacket, fileBytes)
+	if err != nil {
+		fmt.Println("Could not create filebytes packet...")
+		return nil
+	}
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, fileDataPacket); err != nil {
+		fmt.Println("E:Sending file packet. Forcing disconnect.\n", err.Error())
+		_ = conn.Close()
+		return err
+	}
 
 	return nil
-	// fmt.Printf("% X \n", pkt)
-	if err := conn.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
-		return fmt.Errorf("E:Writing to server. %s", err.Error())
-	}
-
-	connCloseFlag := false
-
-	fileToBeSent, err = os.Open(filepath)
-	if err != nil {
-		return fmt.Errorf("E:Opening file. %s", err.Error())
-	}
-
-	defer fileToBeSent.Close()
-
-	// Read loop
-	for {
-		_, response, err := conn.ReadMessage()
-		if err != nil {
-			if connCloseFlag {
-				fmt.Println("Server closed the connection.")
-			}
-
-			return fmt.Errorf("E:Reading server response. %s", err.Error())
-		}
-
-		if len(response) == 0 {
-			log.Println("Server responded with nothing.")
-			shared.RequestCloseConn(conn)
-		}
-
-		// first byte will always be the version
-		// second is the initial_byte
-		// [version][initial_byte][...]
-		// Handling initial byte type
-		switch response[1] {
-		// [version][initial_byte][unique_code]
-		case shared.InitialTypeUniqueCode:
-			if len(response) < 3 {
-				log.Println("Server responded with no code.")
-				shared.RequestCloseConn(conn)
-			}
-
-			unique_code = uint8(response[2])
-			fmt.Printf("Transfer code is %d. Waiting for the receiver...\n", unique_code)
-
-		// Text response from the server
-		case shared.InitialTypeTextMessage:
-			if len(response) > 2 {
-				fmt.Println(string(response[2:]))
-
-			}
-
-		case shared.InitialTypeRequestNextPkt:
-			pkt, isEOF, err := RequestNextPkt()
-
-			if err != nil {
-				fmt.Println("E:Getting next packet")
-				shared.RequestCloseConn(conn)
-				// conn.Close()
-			}
-
-			if isEOF {
-				resp, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeFinishTransfer)
-				if err != nil {
-					fmt.Println("E:Creating packet. EOF reached. Finishing transfer", err.Error())
-					shared.RequestCloseConn(conn)
-				}
-
-				if err := conn.WriteMessage(websocket.BinaryMessage, resp); err != nil {
-					fmt.Println("E:Writing to server.", err.Error())
-					shared.RequestCloseConn(conn)
-				}
-			}
-
-			finalpkt, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeTransferPacket)
-			finalpkt = append(finalpkt, pkt...)
-
-			// buf[:n] to send only the valid portion of read data
-			// So if at the end only 9 bytes were read, we send only that 9 byte slice.
-			sendCount += 1
-			if err = conn.WriteMessage(websocket.BinaryMessage, finalpkt); err != nil {
-				log.Println("E:Sending chunk.", err.Error())
-				shared.RequestCloseConn(conn)
-
-			}
-
-		case shared.InitialTypeCloseConn:
-			connCloseFlag = true
-			if len(response) == 3 {
-				fmt.Println(string(response[2:]))
-			}
-		}
-	}
 }
 
-// Every client needs to register with the server by handshaking with ClientHandshake obj
-// It is difficult to differentiate between register requests and packet transfer requests
-// Thus a special 1 byte is appended to the start of each request to indicate the type.
-func CreateRegisterSenderPkt(handshakeObj *ClientHandshake) ([]byte, error) {
-	messageType := []byte{shared.Version, shared.InitialTypeRegisterSender}
-	requestJson, err := json.Marshal(handshakeObj)
-	if err != nil {
-		return nil, err
-	}
-
-	message := append(messageType, requestJson...)
-	return message, nil
-}
-
-// []byte type in go is already a reference type
-func SerializePacket(dataPacket []byte) ([]byte, error) {
-	buffer := new(bytes.Buffer)
-
-	if err := binary.Write(buffer, binary.BigEndian, shared.Version); err != nil {
-		return nil, err
-	}
-
-	// Append an indicator byte to tell the server that this is for transfer
-	// 2 variants for register and transfer
-	if err := binary.Write(buffer, binary.BigEndian, shared.InitialTypeTransferPacket); err != nil {
-		return nil, err
-	}
-
-	if err := binary.Write(buffer, binary.BigEndian, dataPacket); err != nil {
-		return nil, err
-	}
-
-	return buffer.Bytes(), nil
-}
-
-func SendNextPacket() {}
-
-func InitFileForTransfer() {}
-
-// Returns the next packet from the file
-// If EOF, returns false
-func RequestNextPkt() ([]byte, bool, error) {
+func GetNextFileBytes() ([]byte, bool, error) {
 	// Reads len(buf) -> 1024 bytes and stores them into buf itself
-	n, err := fileToBeSent.Read(sendBuf)
+	n, err := activeFileBeingSent.Read(sendBuf)
 	if err != nil {
 		if err == io.EOF {
-			fmt.Println("Finished upload")
 			return nil, true, nil
 		}
 
-		log.Println("E:Reading file.", err.Error())
 		return nil, false, err
 
 	}
@@ -276,12 +237,6 @@ func RequestNextPkt() ([]byte, bool, error) {
 	if n == 0 {
 		return nil, true, nil
 	}
-
-	// packet_frame, err := SerializePacket(sendBuf[:n])
-	// if err != nil {
-	// 	fmt.Println("E:Could not SerializePacket.", err.Error())
-	// 	return nil, false, nil
-	// }
 
 	return sendBuf[:n], false, nil
 }

@@ -1,11 +1,8 @@
 package receiver
 
 import (
-	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,58 +13,23 @@ import (
 )
 
 var (
+	receiverPath     string
 	unique_code      uint8
 	count            = 1
 	transferMD       MDReceiver
 	totalArrivedSize int
 	// Toggled to true when server notifies that its about to close the connection.
-	CLOSE_CONN = false
+	CLOSE_CONN    = false
+	IncomingFiles []shared.FileInfo
+	// Keep track of file ids received
+	FileIdsReceived []uint8
+
+	// Increment with every new file being transfered
+	ActiveTransferFileId    = 1
+	activeFileBeingReceived *os.File
+
+	progressBar *shared.ProgressBar
 )
-
-// Receiver packet
-// [version][initial_byte][unique_code][receiver_name]
-func CreateRegisterReceiverPkt(receiverName string, uniqueCode uint8) ([]byte, error) {
-	handshakeBuffer := new(bytes.Buffer)
-
-	// Version
-	if err := binary.Write(handshakeBuffer, binary.BigEndian, shared.Version); err != nil {
-		return nil, err
-	}
-
-	// Initial byte
-	if err := binary.Write(handshakeBuffer, binary.BigEndian, shared.InitialTypeRegisterReceiver); err != nil {
-		return nil, err
-	}
-
-	// Unique code
-	if err := binary.Write(handshakeBuffer, binary.BigEndian, uniqueCode); err != nil {
-		return nil, err
-	}
-
-	// Receiver name
-	if err := binary.Write(handshakeBuffer, binary.BigEndian, []byte(receiverName)); err != nil {
-		return nil, err
-	}
-
-	return handshakeBuffer.Bytes(), nil
-}
-
-// Parse the incoming []byte into a Packet object.
-// Converting to struct might be an overhead.
-// Maybe should try a more direct method.
-// TBD
-func ParsePacket(packetBytes []byte) ([]byte, error) {
-	buffer := bytes.NewReader(packetBytes)
-
-	var read_dataBytes = make([]byte, len(packetBytes))
-
-	// incomingData := len(packetBytes[6:])
-	if err := binary.Read(buffer, binary.BigEndian, &read_dataBytes); err != nil {
-		return read_dataBytes, err
-	}
-
-	return read_dataBytes, nil
-}
 
 // Metadata for receiver from server
 type MDReceiver struct {
@@ -76,7 +38,9 @@ type MDReceiver struct {
 	Filename   string
 }
 
-func HandleReceiveArg(receiverName, targetDirPath string) error {
+func HandleReceiveArg(receiverName, targetDirPath, pbType string, pbRGBOn, pbIsMB bool, pbLength int, pbOff bool) error {
+	receiverPath = targetDirPath
+
 	var resUniqueCode string
 	fmt.Println("Enter the code")
 	fmt.Scan(&resUniqueCode)
@@ -100,15 +64,16 @@ func HandleReceiveArg(receiverName, targetDirPath string) error {
 	}
 
 	defer conn.Close()
+	defer activeFileBeingReceived.Close()
 
-	if err := HandleReceiverConn(conn); err != nil {
+	if err := HandleReceiverConn(conn, pbType, pbRGBOn, pbIsMB, pbLength, pbOff); err != nil {
 		fmt.Println(err.Error())
 	}
 
 	return nil
 }
 
-func HandleReceiverConn(conn *websocket.Conn) error {
+func HandleReceiverConn(conn *websocket.Conn, pbType string, pbRGBOn, pbIsMB bool, pbLength int, pbOff bool) error {
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
@@ -128,6 +93,122 @@ func HandleReceiverConn(conn *websocket.Conn) error {
 				fmt.Printf("%s %s\n", shared.ColourSprintf("Server:", "cyan", false), string(message[2:]))
 			}
 
+		case shared.InitialTypeReceiverMD:
+			if err := json.Unmarshal(message[2:], &IncomingFiles); err != nil {
+				fmt.Println("Err umarshalling", err.Error())
+				// Request disconn ig
+			}
+
+			if len(IncomingFiles) > 1 {
+				shared.ColourPrint("Receiving files", "yellow")
+			} else {
+
+				shared.ColourPrint("Receiving file", "yellow")
+			}
+
+			totalFileSize := 0
+			for _, file := range IncomingFiles {
+				totalFileSize += int(file.Size)
+				fmt.Printf("%d  %s - %s\n", file.Id, shared.ColourSprintf(fmt.Sprintf("[%.2fMB]", float64(file.Size)/float64(1000_000)), "yellow", false), file.RelativePath)
+			}
+
+			progressBar = shared.NewProgressBar(totalFileSize, pbType, pbLength, pbRGBOn, "", pbIsMB, pbOff)
+
+			var resBeginTransfer string
+			fmt.Println("Begin transfer? (y/n)")
+			fmt.Scan(&resBeginTransfer)
+
+			if resBeginTransfer == "yes" || resBeginTransfer == "y" || resBeginTransfer == "Y" {
+				fmt.Println("Starting transfer")
+
+				if err := CreateFileWithDirs(IncomingFiles[ActiveTransferFileId-1].RelativePath); err != nil {
+					fmt.Println(err.Error())
+					continue
+				}
+
+				// Start the transfer of a file with Id
+				startTransferWithFileIdPkt, _ := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeStartTransferWithId, uint8(ActiveTransferFileId))
+				if err := conn.WriteMessage(websocket.BinaryMessage, startTransferWithFileIdPkt); err != nil {
+					fmt.Println("E:Requesting next packet. Forcing disconnect.\n", err.Error())
+					_ = conn.Close()
+					return nil
+				}
+
+				progressBar.UpdateOngoingForNewFile(int(IncomingFiles[ActiveTransferFileId-1].Size))
+
+			} else {
+				// Abort transfer
+				fmt.Println("Aborting transfer")
+				abortpkt, _ := shared.CreateBinaryPacket(shared.Version, shared.InitialAbortTransfer)
+				if err := conn.WriteMessage(websocket.BinaryMessage, abortpkt); err != nil {
+					fmt.Println("E:Aborting transfer. Forcing disconnect.\n", err.Error())
+					_ = conn.Close()
+					return nil
+				}
+			}
+
+		case shared.InitialTypeTransferPacket:
+			if len(message) < 3 {
+				fmt.Println("Empty file chunk received.")
+				continue
+			}
+
+			incomingFileChunk := message[2:]
+			// TODO: Add a connection close request here.
+
+			_, err = activeFileBeingReceived.Write(incomingFileChunk)
+			if err != nil {
+				fmt.Println("E:Writing data.", err.Error())
+				shared.RequestCloseConn(conn)
+			}
+
+			progressBar.UpdateTransferredSize(len(incomingFileChunk))
+			progressBar.Show()
+
+			// fmt.Print("\033[0K") // Clear the line from the cursor to the end
+			nextPacketRequest, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeRequestNextPacket)
+			if err != nil {
+				fmt.Println("\nCould not create next packet request.")
+				continue
+			}
+
+			if err := conn.WriteMessage(websocket.BinaryMessage, nextPacketRequest); err != nil {
+				fmt.Println("\nE:Writing file chunk.", err.Error())
+				shared.RequestCloseConn(conn)
+			}
+
+		case shared.InitialTypeSingleFileTransferFinish:
+			if err := activeFileBeingReceived.Close(); err != nil {
+				fmt.Println("Could not close file.", IncomingFiles[ActiveTransferFileId-1].RelativePath, err.Error())
+			}
+			progressBar.PrintPostDoneMessage(fmt.Sprintf("Finished receiving file %s", IncomingFiles[ActiveTransferFileId-1].RelativePath))
+
+			FileIdsReceived = append(FileIdsReceived, uint8(ActiveTransferFileId))
+
+			// All files finished transferring
+			if len(FileIdsReceived) == len(IncomingFiles) {
+				continue
+			}
+
+			ActiveTransferFileId += 1
+
+			if err := CreateFileWithDirs(IncomingFiles[ActiveTransferFileId-1].RelativePath); err != nil {
+				fmt.Println(err.Error())
+				continue
+			}
+
+			// Start the transfer of a file with Id
+			startTransferWithFileIdPkt, _ := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeStartTransferWithId, uint8(ActiveTransferFileId))
+			if err := conn.WriteMessage(websocket.BinaryMessage, startTransferWithFileIdPkt); err != nil {
+				fmt.Println("E:Requesting next packet. Forcing disconnect.\n", err.Error())
+				_ = conn.Close()
+				return nil
+			}
+			progressBar.UpdateOngoingForNewFile(int(IncomingFiles[ActiveTransferFileId-1].Size))
+
+		case shared.InitialTypeAllTransferFinish:
+			fmt.Println("\nAll files have been received.")
+
 		case shared.InitialTypeCloseConnNotify:
 			CLOSE_CONN = true
 		}
@@ -135,198 +216,19 @@ func HandleReceiverConn(conn *websocket.Conn) error {
 	}
 }
 
-// TODO: Instead of the conn being passed down here, create a func called GetConn or smn
-// It attempts to connect to the server for no reason
-func HandleConn2(receiverName, targetDirPath string) error {
-	var targetFile *os.File
-	defer targetFile.Close()
+func CreateFileWithDirs(targetPath string) error {
+	targetPath = filepath.Join(receiverPath, targetPath)
+	var err error
 
-	var resUniqueCode string
-	fmt.Println("Enter the code")
-	fmt.Scan(&resUniqueCode)
+	targetDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(targetDir, os.ModePerm); err != nil {
+		return fmt.Errorf("Could not create dirs for incoming file. %s.\n%s", targetPath, err.Error())
+	}
 
-	code, err := strconv.ParseUint(resUniqueCode, 10, 8)
+	activeFileBeingReceived, err = os.Create(targetPath)
 	if err != nil {
-		return fmt.Errorf("E:Could not parse input to uint8. Invalid input.")
+		return fmt.Errorf("Could not create incoming file. %s.\n%s", targetPath, err.Error())
 	}
 
-	unique_code = uint8(code)
-
-	queryParams := url.Values{}
-	queryParams.Add("intent", "receive")
-	queryParams.Add("code", strconv.Itoa(int(code)))
-	queryParams.Add("receivername", receiverName)
-
-	finalURL := fmt.Sprintf("%s?%s", shared.Endpoint, queryParams.Encode())
-	conn, err := shared.InitConnection(finalURL)
-	if err != nil {
-		return err
-	}
-
-	pkt, err := CreateRegisterReceiverPkt(receiverName, uint8(code))
-	if err != nil {
-		return fmt.Errorf("E:Creating receiver register packet. %s", err.Error())
-	}
-
-	if err := conn.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
-		return fmt.Errorf("E:Sending receiver register packet. %s", err.Error())
-	}
-
-	// flag enabled after closeConn byte from server
-	// For graceful exit
-	connCloseFlag := false
-
-	var singleblip int
-	transferStarted := false
-
-	// Read loop
-	for {
-		_, response, err := conn.ReadMessage()
-		if err != nil {
-			if connCloseFlag {
-				fmt.Println("\nServer closed the connection.")
-				return nil
-			}
-
-			log.Println("E:Reading message.", err.Error())
-			shared.RequestCloseConn(conn)
-		}
-
-		if len(response) == 0 {
-			fmt.Println("E:Server responded with nothing.")
-			shared.RequestCloseConn(conn)
-		}
-
-		// Handling initial byte type
-		// [version][initial_byte][...]
-		switch response[1] {
-		// [version][unique_code][JsonMD]
-		case shared.InitialTypeTransferMetaData:
-			// Ignore the initial byte
-			if err := json.Unmarshal(response[2:], &transferMD); err != nil {
-				fmt.Println("Could not unmarshal", err.Error())
-				shared.RequestCloseConn(conn)
-			}
-
-			singleblip = int(transferMD.FileSize) / 20
-
-			// Join target dir and filename and create the file
-			finalTargetFilePath := filepath.Join(targetDirPath, transferMD.Filename)
-			targetFile, err = os.Create(finalTargetFilePath)
-			if err != nil {
-				return fmt.Errorf("E:Creating target file. %s", err.Error())
-			}
-
-			fmt.Printf("Receiving %s [%.2fMB] from %s\n", transferMD.Filename, float64(transferMD.FileSize)/float64(1000_000), transferMD.SenderName)
-
-			var res string
-			fmt.Println("Begin transfer? (y/n)")
-			fmt.Scan(&res)
-
-			var triggerByte uint8
-			if res == "yes" || res == "y" || res == "Y" {
-				triggerByte = 1
-				fmt.Println("Starting transfer")
-			} else {
-				// Abort transfer
-				fmt.Println("Aborting transfer")
-				triggerByte = 0
-			}
-
-			// Begin transfer
-			// Begintransfer from receiver packet frame
-			// [initial_byte][trigger_byte][unique_code]
-			resp, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeRequestNextPkt, triggerByte)
-			if err != nil {
-				log.Println("E:creating binary response. Closing.", err.Error())
-				shared.RequestCloseConn(conn)
-			}
-
-			if err := conn.WriteMessage(websocket.BinaryMessage, resp); err != nil {
-				fmt.Println("E:Writing response. Closing.", err.Error())
-				shared.RequestCloseConn(conn)
-			}
-
-		case shared.InitialTypeTransferPacket:
-			count += 1
-			incomingFileChunk, err := ParsePacket(response[2:])
-			// TODO: Add a connection close request here.
-			if err != nil {
-				fmt.Println("E:Parsing incoming packet. Stopping.", err.Error())
-				// _ = conn.Close()
-			}
-
-			_, err = targetFile.Write(incomingFileChunk)
-			if err != nil {
-				fmt.Println("E:Writing data.", err.Error())
-				shared.RequestCloseConn(conn)
-			}
-
-			totalArrivedSize += len(response[2:])
-
-			fillSize := totalArrivedSize / singleblip
-			fill_container := ""
-			for i := 0; i < 20; i++ {
-				if i < fillSize {
-					fill_container += "#"
-				} else {
-					fill_container += "-"
-				}
-			}
-
-			if !transferStarted {
-				fmt.Printf("%s\n%.2f/%.2f kb received", fill_container, float64(totalArrivedSize)/float64(1000), float64(transferMD.FileSize)/float64(1000))
-				transferStarted = true
-			} else {
-				fmt.Printf("\033[F%s\n%.2f/%.2f kb received", fill_container, float64(totalArrivedSize)/float64(1000), float64(transferMD.FileSize)/float64(1000))
-			}
-
-			// fmt.Printf("\r%d/%d %s", totalArrivedSize, transferMD.FileSize, "bytes")
-
-			// fmt.Print("\033[0K") // Clear the line from the cursor to the end
-			resp, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeRequestNextPkt)
-			if err != nil {
-				fmt.Println("\nE:Creating file chunks.", err.Error())
-				shared.RequestCloseConn(conn)
-			}
-
-			if err := conn.WriteMessage(websocket.BinaryMessage, resp); err != nil {
-				fmt.Println("\nE:Writing file chunk.", err.Error())
-				shared.RequestCloseConn(conn)
-			}
-
-		// Disconnection done by server
-		case shared.InitialTypeFinishTransfer:
-			fmt.Println("\nTransfer finished")
-
-		// Text response from the server
-		case shared.InitialTypeTextMessage:
-			if len(response) > 2 {
-				fmt.Println(string(response[2:]))
-			}
-
-		// Server sends this when it closes the connection from its side
-		// Toggle flag to exit after crash
-		case shared.InitialTypeCloseConn:
-			connCloseFlag = true
-			if len(response) == 3 {
-				fmt.Println(string(response[2:]))
-			}
-
-		default:
-			log.Println("Random initial byte", response[0])
-			shared.RequestCloseConn(conn)
-		}
-	}
-
-}
-
-func ReceiveFile(conn *websocket.Conn) {
-}
-
-func VoluntaryDisconnect(conn *websocket.Conn) {
-
-}
-
-func CreateTargetFile() {
+	return nil
 }
