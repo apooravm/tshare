@@ -17,11 +17,11 @@ var (
 	pbType      = "total"
 	pbRGBOn     = false
 	pbLength    = 20
-	pbIsMB      = false
+	pbIsMB      = true
 	pbOff       = false
 	client_name string
-	// chunkSize   uint32 = 262144
-	chunkSize uint32 = 128
+	chunkSize   uint32 = 262144
+	// chunkSize uint32 = 128
 	// chunkSize    uint8 = 128
 	// chunkSize uint16 = 2048
 	// chunk uint16 = 16384
