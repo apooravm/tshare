@@ -20,7 +20,8 @@ var (
 	pbIsMB      = true
 	pbOff       = false
 	client_name string
-	chunkSize   uint32 = 262144
+	// chunkSize   uint32 = 262144
+	chunkSize uint32 = 1000 * 1024
 	// chunkSize uint32 = 128
 	// chunkSize    uint8 = 128
 	// chunkSize uint16 = 2048
@@ -212,6 +213,7 @@ func handleFlags() error {
 		case "pbunit":
 			switch argParts[1] {
 			case "kb":
+				pbIsMB = false
 			case "mb":
 				pbIsMB = true
 			default:
