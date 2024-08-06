@@ -71,7 +71,7 @@ var (
 type Packet struct {
 	Version    byte
 	UniqueCode byte
-	DataSize   uint16
+	Timestamp  int64
 	Data       []byte
 }
 

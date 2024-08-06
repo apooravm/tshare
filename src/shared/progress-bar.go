@@ -80,6 +80,7 @@ func (pb *ProgressBar) UpdateOngoingForNewFile(filesize int) {
 func (pb *ProgressBar) UpdateTransferredSize(chunkSize int) {
 	pb.OngoingFileTransferredSize += chunkSize
 	pb.TotalTransferredSize += chunkSize
+
 }
 
 func (pb *ProgressBar) Show() {

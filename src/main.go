@@ -129,6 +129,7 @@ func PrintHelp() {
 	fmt.Println("Help - Display this helper text. 'tshare-client.exe help")
 	fmt.Println("\nSubcommands - Attach these at the end")
 	fmt.Println("Set a custom chunk size. '-chunk=<CHUNK_SIZE>'")
+	fmt.Println("Set a custom chunk multiple. chunkSize -> (x * 1024) '-chunkm=<NUM>'")
 	fmt.Println("Set a custom client name. '-name=<NAME>'")
 	fmt.Println("Set to dev mode. '-mode=dev'")
 	fmt.Println("Set progress bar type. all/single '-pbtype=single'")
@@ -173,6 +174,14 @@ func handleFlags() error {
 			}
 
 			chunkSize = uint32(cSize)
+
+		case "chunkm":
+			cSize, err := strconv.ParseUint(argParts[1], 10, 32)
+			if err != nil {
+				return fmt.Errorf("Invalid chunk multiple. Must be uint32.")
+			}
+
+			chunkSize = uint32(cSize) * 1024
 
 		case "name":
 			client_name = argParts[1]

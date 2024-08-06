@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/apooravm/tshare-client/src/shared"
 	"github.com/gorilla/websocket"
@@ -39,7 +40,8 @@ var (
 
 	transferStarted bool
 
-	progressBar *shared.ProgressBar
+	progressBar       *shared.ProgressBar
+	currTransferSpeed float64
 )
 
 // Since handshake is a 1 time thing, it will be done through json
@@ -206,7 +208,9 @@ func SendNextPacket(conn *websocket.Conn) error {
 	progressBar.UpdateTransferredSize(len(fileBytes))
 	progressBar.Show()
 
-	fileDataPacket, err = shared.CreateBinaryPacket(shared.Version, shared.InitialTypeTransferPacket, fileBytes)
+	// Refer to shared.Packet
+	// [Version 1byte][Init_byte 1byte][timestamp int64][datachunk...]
+	fileDataPacket, err = shared.CreateBinaryPacket(shared.Version, shared.InitialTypeTransferPacket, time.Now().UnixMilli(), fileBytes)
 	if err != nil {
 		fmt.Println("Could not create filebytes packet...")
 		return nil

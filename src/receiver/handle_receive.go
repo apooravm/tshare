@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/apooravm/tshare-client/src/shared"
 	"github.com/gorilla/websocket"
@@ -29,6 +30,11 @@ var (
 	activeFileBeingReceived *os.File
 
 	progressBar *shared.ProgressBar
+
+	requestMadeTime  time.Time
+	dataReceivedTime time.Time
+
+	currTransferSpeed_bps float64
 )
 
 // Metadata for receiver from server
@@ -153,9 +159,18 @@ func HandleReceiverConn(conn *websocket.Conn, pbType string, pbRGBOn, pbIsMB boo
 				continue
 			}
 
-			incomingFileChunk := message[2:]
-			// TODO: Add a connection close request here.
+			// Refer to shared.Packet
+			// [Version 1byte][Init_byte 1byte][timestamp int64 4byte][datachunk...]
+			dataReceivedTime = time.Now()
+			incomingFileChunk := message[7:]
 
+			// duration := dataReceivedTime.Sub(requestMadeTime).Nanoseconds()
+			// // bytes per nano sec
+			// currTransferSpeed_bps = float64(len(incomingFileChunk)) / float64(duration)
+			// // conv to bytes per sec
+			// currTransferSpeed_bps *= 1e9
+
+			// TODO: Add a connection close request here.
 			_, err = activeFileBeingReceived.Write(incomingFileChunk)
 			if err != nil {
 				fmt.Println("E:Writing data.", err.Error())
@@ -166,6 +181,7 @@ func HandleReceiverConn(conn *websocket.Conn, pbType string, pbRGBOn, pbIsMB boo
 			progressBar.Show()
 
 			// fmt.Print("\033[0K") // Clear the line from the cursor to the end
+			requestMadeTime = time.Now()
 			nextPacketRequest, err := shared.CreateBinaryPacket(shared.Version, shared.InitialTypeRequestNextPacket)
 			if err != nil {
 				fmt.Println("\nCould not create next packet request.")
